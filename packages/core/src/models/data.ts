@@ -74,12 +74,8 @@ export class TopologyData {
     // if (!this.mqttOptions) {
     //   this.mqttOptions = { clientId: s8() };
     // }
+    if (json.events) {
+      this.events = json.events;
+    }
   }
-
-      if (json.events) {
-        this.events = json.events;
-<<<<<<< .mine
 }
-=======
-      }
->>>>>>> .theirs
