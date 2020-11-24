@@ -15,15 +15,15 @@ export class TopologyData {
   bkColor: string;
   grid?: boolean;
   websocket?: string;
-  mqttUrl?: string;
-  mqttOptions?: {
-    clientId?: string;
-    username?: string;
-    password?: string;
-  } = {
-    clientId: s8(),
-  };
-  mqttTopics?: string;
+  // mqttUrl?: string;
+  // mqttOptions?: {
+  //   clientId?: string;
+  //   username?: string;
+  //   password?: string;
+  // } = {
+  //   clientId: s8(),
+  // };
+  // mqttTopics?: string;
   manualCps?: boolean;
   tooltip?: boolean | number;
   data?: any;
@@ -48,28 +48,29 @@ export class TopologyData {
       this.manualCps = json.manualCps;
 
       this.websocket = json.websocket;
-      this.mqttUrl = json.mqttUrl;
-      if (json.mqttOptions) {
-        let opts = '';
-        if (typeof json.mqttOptions === 'object') {
-          opts = JSON.stringify(json.mqttOptions);
-        } else {
-          opts = json.mqttOptions + '';
-        }
-        this.mqttOptions = JSON.parse(opts);
-      } else {
-        this.mqttOptions = { clientId: s8() };
-      }
-      this.mqttTopics = json.mqttTopics;
+    }
+    //   this.mqttUrl = json.mqttUrl;
+    //   if (json.mqttOptions) {
+    //     let opts = '';
+    //     if (typeof json.mqttOptions === 'object') {
+    //       opts = JSON.stringify(json.mqttOptions);
+    //     } else {
+    //       opts = json.mqttOptions + '';
+    //     }
+    //     this.mqttOptions = JSON.parse(opts);
+    //   } else {
+    //     this.mqttOptions = { clientId: s8() };
+    //   }
+    //   this.mqttTopics = json.mqttTopics;
 
-      if (typeof json.data === 'object') {
-        this.data = JSON.parse(JSON.stringify(json.data));
-      } else {
-        this.data = json.data || '';
-      }
-    }
-    if (!this.mqttOptions) {
-      this.mqttOptions = { clientId: s8() };
-    }
+    //   if (typeof json.data === 'object') {
+    //     this.data = JSON.parse(JSON.stringify(json.data));
+    //   } else {
+    //     this.data = json.data || '';
+    //   }
+    // }
+    // if (!this.mqttOptions) {
+    //   this.mqttOptions = { clientId: s8() };
+    // }
   }
 }

@@ -21,7 +21,7 @@ import { pointInRect } from './utils/canvas';
 import { getRect } from './utils/rect';
 import { formatPadding } from './utils/padding';
 import { Socket } from './socket';
-import { MQTT } from './mqtt';
+// import { MQTT } from './mqtt';
 import { Direction } from './models';
 
 const resizeCursors = ['nw-resize', 'ne-resize', 'se-resize', 'sw-resize'];
@@ -105,7 +105,7 @@ export class Topology {
   gridElem: HTMLElement = document.createElement('div');
 
   socket: Socket;
-  mqtt: MQTT;
+  // mqtt: MQTT;
   _emitter: Emitter;
 
   private scheduledAnimationFrame = false;
@@ -499,9 +499,9 @@ export class Topology {
     }
 
     this.data.websocket = data.websocket;
-    this.data.mqttUrl = data.mqttUrl;
-    this.data.mqttOptions = data.mqttOptions || { clientId: s8() };
-    this.data.mqttTopics = data.mqttTopics;
+    // this.data.mqttUrl = data.mqttUrl;
+    // this.data.mqttOptions = data.mqttOptions || { clientId: s8() };
+    // this.data.mqttTopics = data.mqttTopics;
     this.data.grid = data.grid;
     if (typeof data.data === 'object') {
       this.data.data = JSON.parse(JSON.stringify(data.data));
@@ -522,7 +522,7 @@ export class Topology {
 
     this.animate(true);
     this.openSocket();
-    this.openMqtt();
+    // this.openMqtt();
 
     this.showGrid();
   }
@@ -540,18 +540,18 @@ export class Topology {
     }
   }
 
-  openMqtt(url?: string, options?: any) {
-    this.closeMqtt();
-    if (url || this.data.mqttUrl) {
-      this.mqtt = new MQTT(url || this.data.mqttUrl, options || this.data.mqttOptions, this.data.mqttTopics, this.data);
-    }
-  }
+  // openMqtt(url?: string, options?: any) {
+  //   this.closeMqtt();
+  //   if (url || this.data.mqttUrl) {
+  //     this.mqtt = new MQTT(url || this.data.mqttUrl, options || this.data.mqttOptions, this.data.mqttTopics, this.data);
+  //   }
+  // }
 
-  closeMqtt() {
-    if (this.mqtt) {
-      this.mqtt.close();
-    }
-  }
+  // closeMqtt() {
+  //   if (this.mqtt) {
+  //     this.mqtt.close();
+  //   }
+  // }
 
   overflow() {
     const rect = this.getRect();

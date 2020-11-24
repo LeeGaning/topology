@@ -2,7 +2,7 @@ export enum EventType {
   Click,
   DblClick,
   WebSocket,
-  Mqtt
+  // Mqtt
 }
 
 export enum EventAction {
