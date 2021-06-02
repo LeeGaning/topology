@@ -1,7 +1,6 @@
 import { Store } from 'le5le-store';
 
 import { s8 } from '../utils/uuid';
-import { Point } from './point';
 import { Rect } from './rect';
 import { EventType, EventAction } from './event';
 
@@ -12,38 +11,99 @@ export enum PenType {
   Line,
 }
 
+export interface Action {
+  do?: string;
+  url?: string;
+  _blank?: string;
+  tag?: string;
+  fn?: string;
+  params?: any;
+}
+
+export interface Event {
+  type: EventType;
+  action: EventAction;
+  value: string;
+  params: string;
+  name?: string;
+}
+
+export interface Where {
+  key?: string;
+  comparison?: string;
+  value?: any;
+  fn?: string;
+  actions?: Action[];
+}
+
+const eventFns: string[] = ['link', 'doStartAnimate', 'doFn', 'doWindowFn', '', 'doPauseAnimate', 'doStopAnimate', 'doEmit'];
+
+const defaultPen: any = {
+  name: '',
+  tags: [],
+  visible: true,
+  rect: new Rect(0, 0, 0, 0),
+  fontColor: '',
+  fontFamily: '"Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial',
+  fontSize: 12,
+  lineHeight: 1.5,
+  fontStyle: 'normal',
+  fontWeight: 'normal',
+  textAlign: 'center',
+  textBaseline: 'middle',
+  textBackground: '',
+  animateCycleIndex: 0,
+  events: [],
+  dash: 0,
+  lineDashOffset: 0,
+  lineWidth: 1,
+  strokeStyle: '',
+  fillStyle: '',
+  globalAlpha: 1,
+  rotate: 0,
+  offsetRotate: 0,
+  textMaxLine: 0,
+  textOffsetX: 0,
+  textOffsetY: 0,
+  animatePos: 0,
+};
+
+export const images: {
+  [key: string]: { img: HTMLImageElement; };
+} = {};
+
 export abstract class Pen {
   TID: string;
   id: string;
-  type = PenType.Node;
+  type: PenType;
   name: string;
   tags: string[];
-  rect: Rect = new Rect(0, 0, 0, 0);
-  lineWidth = 1;
-  rotate = 0;
-  offsetRotate = 0;
-  globalAlpha = 1;
+  rect: Rect;
+  lineWidth: number;
+  rotate: number;
+  offsetRotate: number;
+  globalAlpha: number;
 
-  dash = 0;
+  dash: number;
   lineDash: number[];
   lineDashOffset: number;
-  strokeStyle = '';
-  fillStyle = '';
+  strokeStyle: string;
+  fillStyle: string;
   lineCap: string;
-  font = {
-    color: '',
-    fontFamily: '"Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial',
-    fontSize: 12,
-    lineHeight: 1.5,
-    fontStyle: 'normal',
-    fontWeight: 'normal',
-    textAlign: 'center',
-    textBaseline: 'middle',
-    background: '',
-  };
+  fontColor: string;
+  fontFamily: string;
+  fontSize: number;
+  lineHeight: number;
+  fontStyle: string;
+  fontWeight: string;
+  textAlign: string;
+  textBaseline: string;
+  textBackground: string;
 
   text: string;
   textMaxLine: number;
+  whiteSpace: string;
+  autoRect: boolean;
   textRect: Rect;
   fullTextRect: Rect;
   textOffsetX: number;
@@ -61,10 +121,13 @@ export abstract class Pen {
   animateStart: number;
   // Cycle count. Infinite if <= 0.
   animateCycle: number;
-  animateCycleIndex = 0;
+  animateCycleIndex: number;
   nextAnimate: string;
   // Auto-play
   animatePlay: boolean;
+
+  animatePos: number;
+  animateReverse: boolean;
 
   locked: Lock;
   // 作为子节点，是否可以直接点击选中
@@ -79,8 +142,8 @@ export abstract class Pen {
   tipId: string;
   title: string;
 
-  events: { type: EventType; action: EventAction; value: string; params: string; name?: string }[] = [];
-  private eventFns: string[] = ['link', 'doAnimate', 'doFn', 'doWindowFn'];
+  events: Event[];
+  wheres: Where[];
 
   parentId: string;
   rectInParent: {
@@ -103,76 +166,78 @@ export abstract class Pen {
 
   visible: boolean;
 
+  fillImage: string;
+  strokeImage: string;
+  fillImg: HTMLImageElement;
+  strokeImg: HTMLImageElement;
+  lastFillImage: string;
+  lastStrokeImage: string;
+
+  children: Pen[];
+
   // User data.
   data: any;
   value: number;
-  constructor(json?: any) {
-    if (json) {
-      this.id = json.id || s8();
-      this.name = json.name || '';
-      this.value = json.value;
-      this.tags = Object.assign([], json.tags);
-      if (json.rect) {
-        this.rect = new Rect(json.rect.x, json.rect.y, json.rect.width, json.rect.height);
-      }
-      this.dash = json.dash || 0;
-      this.lineDash = json.lineDash;
-      this.lineDashOffset = json.lineDashOffset || 0;
-      if (json.lineWidth || json.lineWidth === 0) {
-        this.lineWidth = json.lineWidth;
-      }
-      this.strokeStyle = json.strokeStyle || '';
-      this.fillStyle = json.fillStyle || '';
-      this.lineCap = json.lineCap;
-      this.globalAlpha = json.globalAlpha || 1;
-      this.rotate = json.rotate || 0;
-      this.offsetRotate = json.offsetRotate || 0;
-      if (json.font) {
-        Object.assign(this.font, json.font);
-      }
-      this.text = json.text;
-      if (json.textMaxLine) {
-        this.textMaxLine = +json.textMaxLine || 0;
-      }
-      this.textOffsetX = json.textOffsetX || 0;
-      this.textOffsetY = json.textOffsetY || 0;
+  num: number;
+  num1: number;
+  num2: number;
+  num3: number;
 
-      this.shadowColor = json.shadowColor;
-      this.shadowBlur = json.shadowBlur;
-      this.shadowOffsetX = json.shadowOffsetX;
-      this.shadowOffsetY = json.shadowOffsetY;
-
-      this.animateType = json.animateType;
-      this.animateCycle = json.animateCycle;
-      this.nextAnimate = json.nextAnimate;
-      this.animatePlay = json.animatePlay;
-
-      this.locked = json.locked;
-      this.stand = json.stand;
-      this.hideInput = json.hideInput;
-      this.hideRotateCP = json.hideRotateCP;
-      this.hideSizeCP = json.hideSizeCP;
-      this.hideAnchor = json.hideAnchor;
-      this.events = json.events || [];
-      this.markdown = json.markdown;
-      this.tipId = json.tipId;
-      this.title = json.title;
-      this.visible = json.visible !== false;
-
-      if (json.rectInParent) {
-        this.rectInParent = json.rectInParent;
-      }
-
-      if (typeof json.data === 'object') {
-        this.data = JSON.parse(JSON.stringify(json.data));
-      } else {
-        this.data = json.data || '';
-      }
-    } else {
-      this.id = s8();
-      this.textOffsetX = 0;
-      this.textOffsetY = 0;
+  fromData(defaultData: any, json: any) {
+    if (!json) {
+      json = {};
+    } else if (typeof json === 'string') {
+      json = JSON.parse(json);
     }
+
+    defaultPen.id = s8();
+    defaultData = Object.assign({}, defaultPen, defaultData);
+    for (let key in defaultData) {
+      this[key] = defaultData[key];
+    }
+    for (let key in json) {
+      this[key] = json[key];
+    }
+
+    if (Array.isArray(this.tags)) {
+      this.tags = Object.assign([], this.tags);
+    }
+
+    if (this.rect) {
+      this.rect = new Rect(this.rect.x, this.rect.y, this.rect.width, this.rect.height);
+    }
+
+    this.lineWidth = this.lineWidth || 1;
+
+    // 兼容老格式
+    if (!this.fontColor && json.font) {
+      this.fontColor = json.font.color || this.fontColor;
+      this.fontFamily = json.font.fontFamily || this.fontFamily;
+      this.fontSize = json.font.fontSize || this.fontSize;
+      this.lineHeight = json.font.lineHeight || this.lineHeight;
+      this.fontStyle = json.font.fontStyle || this.fontStyle;
+      this.fontWeight = json.font.fontWeight || this.fontWeight;
+      this.textAlign = json.font.textAlign || this.textAlign;
+      this.textBaseline = json.font.textBaseline || this.textBaseline;
+      this.textBackground = json.font.background || this.textBackground;
+      delete this['font'];
+    }
+    // end
+
+    if (this.events) {
+      this.events = JSON.parse(JSON.stringify(this.events));
+    }
+    if (this.wheres) {
+      this.wheres = JSON.parse(JSON.stringify(this.wheres));
+    }
+
+    if (typeof this.data === 'object') {
+      this.data = JSON.parse(JSON.stringify(this.data));
+    }
+
+    delete this['img'];
+    delete this['animateStart'];
+    delete this['animateReady'];
   }
 
   render(ctx: CanvasRenderingContext2D) {
@@ -181,6 +246,11 @@ export abstract class Pen {
     }
 
     if ((this as any).from && !(this as any).to) {
+      if (this.children) {
+        for (const item of this.children) {
+          item.render(ctx);
+        }
+      }
       return;
     }
 
@@ -190,6 +260,7 @@ export abstract class Pen {
     if ((ctx as any).setAttrs) {
       (ctx as any).setAttrs(this);
     }
+    // end
 
     if (this.rotate || this.offsetRotate) {
       ctx.translate(this.rect.center.x, this.rect.center.y);
@@ -201,8 +272,25 @@ export abstract class Pen {
       ctx.lineWidth = this.lineWidth;
     }
 
-    ctx.strokeStyle = this.strokeStyle || '#222';
-    this.fillStyle && (ctx.fillStyle = this.fillStyle);
+    if (this.strokeImage) {
+      if (this.strokeImage === this.lastStrokeImage && this.strokeImg) {
+        ctx.strokeStyle = ctx.createPattern(this.strokeImg, "repeat");
+      } else {
+        this.loadStrokeImg();
+      }
+    } else {
+      ctx.strokeStyle = this.strokeStyle || Store.get(this.generateStoreKey('LT:color'));
+    }
+
+    if (this.fillImage) {
+      if (this.fillImage === this.lastFillImage && this.fillImg) {
+        ctx.fillStyle = ctx.createPattern(this.fillImg, "repeat");
+      } else {
+        this.loadFillImg();
+      }
+    } else if (this.fillStyle) {
+      ctx.fillStyle = this.fillStyle;
+    }
 
     if (this.lineCap) {
       ctx.lineCap = this.lineCap as CanvasLineCap;
@@ -244,11 +332,46 @@ export abstract class Pen {
 
     ctx.restore();
 
-    if ((this as any).children) {
-      for (const item of (this as any).children) {
+    if (this.children) {
+      for (const item of this.children) {
         item.render(ctx);
       }
     }
+  }
+
+  loadFillImg() {
+    if (!this.fillImage) {
+      return;
+    }
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.src = this.fillImage;
+    img.onload = () => {
+      this.lastFillImage = this.fillImage;
+      this.fillImg = img;
+      images[this.fillImage] = {
+        img,
+      };
+      Store.set(this.generateStoreKey('LT:imageLoaded'), true);
+    };
+  }
+
+  loadStrokeImg() {
+    if (!this.strokeImage) {
+      return;
+    }
+
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.src = this.strokeImage;
+    img.onload = () => {
+      this.lastStrokeImage = this.strokeImage;
+      this.strokeImg = img;
+      images[this.strokeImage] = {
+        img,
+      };
+      Store.set(this.generateStoreKey('LT:imageLoaded'), true);
+    };
   }
 
   click() {
@@ -261,7 +384,7 @@ export abstract class Pen {
         continue;
       }
 
-      this[this.eventFns[item.action]] && this[this.eventFns[item.action]](item.value, item.params);
+      this[eventFns[item.action]] && this[eventFns[item.action]](item.value, item.params);
     }
   }
 
@@ -275,57 +398,92 @@ export abstract class Pen {
         continue;
       }
 
-      this[this.eventFns[item.action]] && this[this.eventFns[item.action]](item.value, item.params);
+      this[eventFns[item.action]] && this[eventFns[item.action]](item.value, item.params);
     }
   }
 
-  doSocketMqtt(
-    item: { type: EventType; action: EventAction; value: string; params: string; name?: string },
-    msg: any,
-    client: any
-  ) {
-    if (item.action < EventAction.Function) {
-      this[this.eventFns[item.action]](msg.value || msg || item.value, msg.params || item.params, client);
-    } else if (item.action < EventAction.SetProps) {
-      this[this.eventFns[item.action]](item.value, msg || item.params, client);
-    } else if (item.action === EventAction.SetProps) {
-      let props: any[] = [];
-      let data = msg;
-      if (typeof msg === 'string') {
-        try {
-          data = JSON.parse(msg);
-        } catch (error) {}
-      }
-      if (Array.isArray(data)) {
-        props = data;
+  moveIn() {
+    if (!this.events) {
+      return;
+    }
+
+    for (const item of this.events) {
+      if (item.type !== EventType.MoveIn) {
+        continue;
       }
 
-      for (const prop of props) {
-        if (prop.key) {
-          const keys = prop.key.split('.');
+      this[eventFns[item.action]] && this[eventFns[item.action]](item.value, item.params);
+    }
+  }
 
-          if (typeof prop.value === 'object') {
-            if (keys[1]) {
-              this[keys[0]][keys[1]] = Object.assign(this[prop.key], prop.value);
-            } else {
-              this[keys[0]] = Object.assign(this[prop.key], prop.value);
-            }
-          } else {
-            if (keys[1]) {
-              this[keys[0]][keys[1]] = prop.value;
-            } else {
-              this[keys[0]] = prop.value;
-            }
-          }
+  moveOut() {
+    if (!this.events) {
+      return;
+    }
+
+    for (const item of this.events) {
+      if (item.type !== EventType.MoveOut) {
+        continue;
+      }
+
+      this[eventFns[item.action]] && this[eventFns[item.action]](item.value, item.params);
+    }
+  }
+
+  doWheres() {
+    if (!this.wheres) {
+      return;
+    }
+
+    this.wheres.forEach((where) => {
+      if (where.fn.trim()) {
+        const fn = new Function('pen', where.fn);
+        if (fn(this)) {
+          where.actions && where.actions.forEach((action: any) => {
+            this.doAction(action);
+          });
+        }
+      } else {
+        const fn = new Function('attr', `return attr ${where.comparison} ${where.value}`);
+        if (fn(this[where.key])) {
+          where.actions && where.actions.forEach((action: any) => {
+            this.doAction(action);
+          });
         }
       }
+    });
+  }
 
-      if (this.type === PenType.Node) {
-        this['elementRendered'] = false;
-      }
-      if (item.params || item.params === undefined) {
-        Store.set(this.generateStoreKey('LT:render'), true);
-      }
+  doAction(action: any) {
+    switch (action.do || action.action) {
+      case 0:
+      case 'Link':
+        this.link(action.url || action.value, action._blank || action.params);
+        break;
+      case 1:
+      case 'StartAnimate':
+        this.doStartAnimate(action.tag || action.value);
+        break;
+      case 5:
+      case 'PauseAnimate':
+        this.doPauseAnimate(action.tag || action.value);
+        break;
+      case 6:
+      case 'StopAnimate':
+        this.doStopAnimate(action.tag || action.value);
+        break;
+      case 2:
+      case 'Function':
+        this.doFn(action.fn || action.value, action.params);
+        break;
+      case 3:
+      case 'WindowFn':
+        this.doWindowFn(action.fn || action.value, action.params);
+        break;
+      case 7:
+      case 'Emit':
+        this.doEmit(action.fn || action.value, action.params);
+        break;
     }
   }
 
@@ -347,38 +505,94 @@ export abstract class Pen {
     return this.TID;
   }
 
-  setTID(id) {
+  setTID(id: string) {
     this.TID = id;
+    if ((this as any).children) {
+      for (const item of (this as any).children) {
+        item.setTID(id);
+      }
+    }
+
     return this;
+  }
+
+  startAnimate() {
+    this.animateStart = Date.now();
+    if (this.type === PenType.Node && !this['animateReady']) {
+      this['initAnimate']();
+    }
+
+    Store.set(this.generateStoreKey('LT:AnimatePlay'), {
+      pen: this,
+    });
+
+    // 跟随动画播放
+    if (this['playType'] === 2) {
+      this.play();
+    }
+  }
+
+  play(pause?: boolean) {
+    Store.set(this.generateStoreKey('LT:play'), {
+      pen: this,
+      pause
+    });
   }
 
   private link(url: string, params: string) {
     window.open(url, params === undefined ? '_blank' : params);
   }
 
-  private doAnimate(tag: string, params: string) {
-    this.animateStart = Date.now();
-    Store.set(this.generateStoreKey('LT:AnimatePlay'), {
-      tag,
+  private doStartAnimate(tag: string, params?: string) {
+    if (tag) {
+      Store.set(this.generateStoreKey('LT:AnimatePlay'), {
+        tag,
+      });
+    } else {
+      this.startAnimate();
+    }
+  }
+
+  private doPauseAnimate(tag: string, params?: string) {
+    if (tag) {
+      Store.set(this.generateStoreKey('LT:AnimatePlay'), {
+        tag,
+        stop: true,
+      });
+    } else {
+      this.pauseAnimate();
+    }
+  }
+
+  private doStopAnimate(tag: string, params?: string) {
+    if (tag) {
+      Store.set(this.generateStoreKey('LT:AnimatePlay'), {
+        tag,
+        stop: true,
+      });
+    } else {
+      this.stopAnimate();
+    }
+  }
+
+  private doFn(fn: string, params: string) {
+    const func: Function = new Function('pen', 'params', fn);
+    func(this, params);
+  }
+
+  private doWindowFn(fn: string, params: string) {
+    (window as any)[fn](this, params);
+  }
+
+  private doEmit(event: string, params: string) {
+    Store.set(this.generateStoreKey('LT:emit'), {
+      event,
+      params,
       pen: this,
     });
   }
 
-  private doFn(fn: string, params: string, client?: any) {
-    let func: Function;
-    if (client) {
-      func = new Function('pen', 'params', 'client', fn);
-    } else {
-      func = new Function('pen', 'params', fn);
-    }
-    func(this, params, client);
-  }
-
-  private doWindowFn(fn: string, params: string, client?: any) {
-    (window as any)[fn](this, params, client);
-  }
-
-  protected generateStoreKey(key) {
+  generateStoreKey(key) {
     return `${this.TID}-${key}`;
   }
 
@@ -386,9 +600,12 @@ export abstract class Pen {
   abstract calcRectInParent(parent: Pen): void;
   abstract calcRectByParent(parent: Pen): void;
   abstract draw(ctx: CanvasRenderingContext2D): void;
-  abstract animate(now: number): void;
-  abstract translate(x: number, y: number): void;
-  abstract scale(scale: number, center?: Point): void;
-  abstract hit(point: Point, padding?: number): any;
+  abstract translate(x: number, y: number, noAnimate?: boolean): void;
+  abstract scale(scale: number, center?: { x: number; y: number; }): void;
+  abstract hit(point: { x: number; y: number; }, padding?: number): any;
   abstract clone(): Pen;
+  abstract initAnimate(): void;
+  abstract animate(now: number): void;
+  abstract pauseAnimate(): void;
+  abstract stopAnimate(): void;
 }

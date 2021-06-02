@@ -21,7 +21,7 @@ import {
   leftArrowIconRect,
   leftArrowTextRect,
   rightArrowIconRect,
-  rightArrowTextRect
+  rightArrowTextRect,
 } from './nodes/arrow.rect';
 import { lineIconRect, lineTextRect } from './nodes/line.rect';
 import { line, lineControlPoints, calcLineControlPoints } from './lines/line';
@@ -30,10 +30,17 @@ import {
   polylineControlPoints,
   pointInPolyline,
   calcPolylineControlPoints,
-  dockPolylineControlPoint
+  dockPolylineControlPoint,
 } from './lines/polyline';
-import { curve, curveControlPoints, pointInCurve, calcCurveControlPoints } from './lines/curve';
-import { mind, calcMindControlPoints, mindControlPoints, pointInMind } from './lines/mind';
+import {
+  curve,
+  curveControlPoints,
+  pointInCurve,
+  calcCurveControlPoints,
+} from './lines/curve';
+import {
+  calcMindControlPoints,
+} from './lines/mind';
 import { triangleSolid, triangle as arrowTriangle } from './arrows/triangle';
 import { diamondSolid, diamond as arrowDiamond } from './arrows/diamond';
 import { circleSolid, circle as arrowCircle } from './arrows/circle';
@@ -56,12 +63,19 @@ import { messageIconRect, messageTextRect } from './nodes/message.rect';
 import { messageAnchors } from './nodes/message.anchor';
 import { file } from './nodes/file';
 import { imageIconRect, imageTextRect } from './nodes/image.rect';
+import { imageAnchors } from './nodes/image.anchor';
 import { cube } from './nodes/cube';
 import { cubeAnchors } from './nodes/cube.anchor';
 import { cubeIconRect, cubeTextRect } from './nodes/cube.rect';
 import { people } from './nodes/people';
 import { peopleIconRect, peopleTextRect } from './nodes/people.rect';
 import { rectangleIconRect, rectangleTextRect } from './nodes/rectangle.rect';
+import { graffiti } from './nodes/graffiti';
+import { graffitiAnchors } from './nodes/graffiti.anchor';
+import { mindNodeAnchors } from './nodes/mindNode.anchor';
+import { mindLine } from './nodes/mindLine';
+import { mindLineAnchors } from './nodes/mindLine.anchor';
+import { lines } from './nodes/lines';
 
 // Functions of drawing a node.
 export const drawNodeFns: any = {};
@@ -79,14 +93,19 @@ export const drawLineFns: any = {};
 export const drawArrowFns: any = {};
 
 function init() {
-  console.log('Init middles.');
-
   // ********Default nodes.*******
   // Combine
   drawNodeFns.combine = rectangle;
 
   // Div
   drawNodeFns.div = rectangle;
+
+  // graffiti
+  drawNodeFns.graffiti = graffiti;
+  anchorsFns.graffiti = graffitiAnchors;
+
+  // lines
+  drawNodeFns.lines = lines;
 
   // Square
   drawNodeFns.square = rectangle;
@@ -178,6 +197,7 @@ function init() {
   drawNodeFns.image = (ctx: CanvasRenderingContext2D, node: Rect) => { };
   iconRectFns.image = imageIconRect;
   textRectFns.image = imageTextRect;
+  anchorsFns.image = imageAnchors;
 
   // Cube
   drawNodeFns.cube = cube;
@@ -185,10 +205,20 @@ function init() {
   iconRectFns.cube = cubeIconRect;
   textRectFns.cube = cubeTextRect;
 
-  // Cube
+  // People
   drawNodeFns.people = people;
   iconRectFns.people = peopleIconRect;
   textRectFns.people = peopleTextRect;
+
+  // MindNode
+  drawNodeFns.mindNode = rectangle;
+  anchorsFns.mindNode = mindNodeAnchors;
+  iconRectFns.mindNode = rectangleIconRect;
+  textRectFns.mindNode = rectangleTextRect;
+
+  // MindLine
+  drawNodeFns.mindLine = mindLine;
+  anchorsFns.mindLine = mindLineAnchors;
   // ********end********
 
   // ********Default lines.*******
@@ -196,26 +226,26 @@ function init() {
     drawFn: line,
     drawControlPointsFn: lineControlPoints,
     controlPointsFn: calcLineControlPoints,
-    pointIn: pointInPolyline
+    pointIn: pointInPolyline,
   };
   drawLineFns.polyline = {
     drawFn: polyline,
     drawControlPointsFn: polylineControlPoints,
     controlPointsFn: calcPolylineControlPoints,
     dockControlPointFn: dockPolylineControlPoint,
-    pointIn: pointInPolyline
+    pointIn: pointInPolyline,
   };
   drawLineFns.curve = {
     drawFn: curve,
     drawControlPointsFn: curveControlPoints,
     controlPointsFn: calcCurveControlPoints,
-    pointIn: pointInCurve
+    pointIn: pointInCurve,
   };
   drawLineFns.mind = {
-    drawFn: mind,
-    drawControlPointsFn: mindControlPoints,
+    drawFn: curve,
+    drawControlPointsFn: curveControlPoints,
     controlPointsFn: calcMindControlPoints,
-    pointIn: pointInMind
+    pointIn: pointInCurve,
   };
   // ********end********
 
@@ -242,17 +272,17 @@ init();
 // anchorsFn - How to get the anchors.
 // iconRectFn - How to get the icon rect.
 // textRectFn - How to get the text rect.
-// force - Overwirte the node if exists.
+// protect - No overwirte the node if exists.
 export function registerNode(
   name: string,
   drawFn: (ctx: CanvasRenderingContext2D, node: Node) => void,
   anchorsFn?: (node: Node) => void,
   iconRectFn?: (node: Node) => void,
   textRectFn?: (node: Node) => void,
-  force = true
+  protect?: boolean
 ) {
   // Exist
-  if (drawNodeFns[name] && !force) {
+  if (drawNodeFns[name] && protect) {
     return false;
   }
 
@@ -278,6 +308,9 @@ export function registerLine(
   controlPointsFn?: (line: Line) => void,
   dockControlPointFn?: (point: Point, line: Line) => void,
   pointInFn?: (point: Point, line: Line) => boolean,
+  getLength?: (line: Line) => void,
+  getCenter?: (line: Line) => void,
+  getPointByPos?: (line: Line) => void,
   force = true
 ) {
   // Exist
@@ -289,8 +322,11 @@ export function registerLine(
     drawFn: drawFn,
     drawControlPointsFn: drawControlPointsFn,
     controlPointsFn: controlPointsFn,
-    dockControlPointFn: dockControlPointFn,
-    pointIn: pointInFn
+    dockControlPointFn,
+    pointIn: pointInFn,
+    getLength,
+    getCenter,
+    getPointByPos,
   };
   return true;
 }
@@ -301,11 +337,16 @@ export function registerLine(
 // force - Overwirte the node if exists.
 export function registerArrow(
   name: string,
-  drawFn: (ctx: CanvasRenderingContext2D, from: Point, to: Point, size: number) => void,
-  force = true
+  drawFn: (
+    ctx: CanvasRenderingContext2D,
+    from: Point,
+    to: Point,
+    size: number
+  ) => void,
+  protect?: boolean
 ) {
   // Exist
-  if (drawArrowFns[name] && !force) {
+  if (drawArrowFns[name] && protect) {
     return false;
   }
 
@@ -314,3 +355,4 @@ export function registerArrow(
 }
 
 (window as any).registerTopologyNode = registerNode;
+(window as any).registerTopologyLine = registerLine;

@@ -1,0 +1,37 @@
+{
+  "name": "@topology/dcs-diagram",
+  "version": "0.0.1",
+  "description": "A dcs diagram tool using le5le-topology.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "scripts": {
+    "copy": "copyfiles  package.json ../../dist/dcs-diagram/",
+    "build": "tsc && npm run copy"
+  },
+  "keywords": [
+    "topology",
+    "dcs",
+    "diagram",
+    "canvas"
+  ],
+  "author": "leeganing@qq.com",
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/le5le-com/topology.git"
+  },
+  "bugs": {
+    "url": "https://github.com/le5le-com/topology/issues"
+  },
+  "homepage": "https://github.com/le5le-com/topology#readme",
+  "peerDependencies": {
+    "@topology/core": "^0.3.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "gitHead": " ",
+  "dependencies": {
+    "number-format.js": "^2.0.9"
+  }
+}

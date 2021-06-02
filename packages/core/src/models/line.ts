@@ -11,30 +11,27 @@ import { abs } from '../utils/math';
 export class Line extends Pen {
   from: Point;
   to: Point;
-  controlPoints: Point[] = [];
+  controlPoints: Point[];
   fromArrow: string;
   toArrow: string;
-  fromArrowSize = 5;
-  toArrowSize = 5;
+  fromArrowSize: number;
+  toArrowSize: number;
   fromArrowColor: string;
   toArrowColor: string;
 
   length: number;
 
-  borderWidth = 0;
-  borderColor = '#000000';
+  borderWidth: number;
+  borderColor: string;
 
-  animateColor = '';
-  animateSpan = 1;
-  animatePos = 0;
+  animateColor: string;
+  animateSpan: number;
   animateLineDash: number[];
-
-  isAnimate = false;
-  animateFromSize = 0;
-  animateToSize = 0;
-
-  animateDot: { x: number; y: number };
-  animateDotSize = 3;
+  isAnimate: boolean;
+  animateFromSize: number;
+  animateToSize: number;
+  animateDot: { x: number; y: number; };
+  animateDotSize: number;
 
   lineJoin: CanvasLineJoin;
 
@@ -42,110 +39,90 @@ export class Line extends Pen {
   disableEmptyLine: boolean;
 
   constructor(json?: any) {
-    super(json);
+    super();
 
+    const defaultData: any = {
+      name: 'curve',
+      fromArrow: '',
+      toArrow: '',
+      controlPoints: [],
+      fromArrowSize: 5,
+      toArrowSize: 5,
+      borderWidth: 0,
+      borderColor: '#000000',
+      animateColor: '',
+      animateSpan: 1,
+      animateFromSize: 0,
+      animateToSize: 0,
+      animateDotSize: 3,
+      textBackground: '#ffffff'
+    };
+
+    this.fromData(defaultData, json);
     this.type = PenType.Line;
-    if (json) {
-      if (json.from) {
-        this.from = new Point(
-          json.from.x,
-          json.from.y,
-          json.from.direction,
-          json.from.anchorIndex,
-          json.from.id,
-          json.autoAnchor
-        );
-      }
-      if (json.to) {
-        this.to = new Point(json.to.x, json.to.y, json.to.direction, json.to.anchorIndex, json.to.id, json.autoAnchor);
-      }
-
-      this.fromArrow = json.fromArrow || '';
-      this.toArrow = json.toArrow || '';
-      this.fromArrowSize = json.fromArrowSize || 5;
-      this.toArrowSize = json.toArrowSize || 5;
-      this.fromArrowColor = json.fromArrowColor;
-      this.toArrowColor = json.toArrowColor;
-      if (json.animateColor) {
-        this.animateColor = json.animateColor;
-      }
-      if (json.animatePos) {
-        this.animatePos = json.animatePos;
-      }
-      if (json.animateSpan) {
-        this.animateSpan = json.animateSpan;
-      }
-      if (json.animateLineDash) {
-        this.animateLineDash = json.animateLineDash;
-      }
-      if (json.animatePlay) {
-        this.animatePlay = json.animatePlay;
-      }
-      if (json.animateStart) {
-        this.animateStart = json.animateStart;
-      }
-      if (json.length) {
-        this.length = json.length;
-      }
-      if (json.borderWidth) {
-        this.borderColor = json.borderColor;
-        this.borderWidth = json.borderWidth;
-      }
-      this.animateDotSize = json.animateDotSize || 3;
-      this.manualCps = json.manualCps;
-      this.disableEmptyLine = json.disableEmptyLine;
-
-      if (json.lineJoin) {
-        this.lineJoin = json.lineJoin;
-      }
-    } else {
-      this.name = 'curve';
-      this.fromArrow = 'triangleSolid';
+    if (json.from) {
+      this.from = new Point(
+        json.from.x,
+        json.from.y,
+        json.from.direction,
+        json.from.anchorIndex,
+        json.from.id,
+        json.autoAnchor
+      );
     }
 
-    if (!this.font.background) {
-      this.font.background = '#fff';
+    if (json.to) {
+      this.to = new Point(json.to.x, json.to.y, json.to.direction, json.to.anchorIndex, json.to.id, json.autoAnchor);
     }
 
     // 暂时兼容老数据
-    if (json.name === 'mind' && json.controlPoints && json.controlPoints.length < 3) {
-      json.controlPoints = null;
-      this.calcControlPoints();
+    if (json.name === 'mind' && (!json.controlPoints || json.controlPoints.length > 2)) {
+      json.controlPoints = undefined;
+      this.calcControlPoints(true);
     }
-    //
-
-    if (json.controlPoints) {
+    // end
+    else if (json.controlPoints) {
+      this.controlPoints = [];
       for (const item of json.controlPoints) {
         this.controlPoints.push(new Point(item.x, item.y, item.direction, item.anchorIndex, item.id));
       }
+    }
+
+    if (json.children) {
+      this.children = [];
+      json.children.forEach((item: Pen) => {
+        this.children.push(new Line(item));
+      });
     }
   }
 
   setFrom(from: Point, fromArrow: string = '') {
     this.from = from;
     this.fromArrow = fromArrow;
-    this.textRect = null;
+    this.textRect = undefined;
   }
 
   setTo(to: Point, toArrow: string = 'triangleSolid') {
     this.to = to;
     this.toArrow = toArrow;
-    this.textRect = null;
+    this.textRect = undefined;
   }
 
   calcControlPoints(force?: boolean) {
-    if (this.manualCps && !force) {
+    if (this.name !== 'line' && this.manualCps && !force) {
       return;
     }
-    this.textRect = null;
+
+    this.textRect = undefined;
     if (this.from && this.to && drawLineFns[this.name]) {
+
       drawLineFns[this.name].controlPointsFn(this);
     }
   }
 
   draw(ctx: CanvasRenderingContext2D) {
     if (this.animateDot) {
-      ctx.fillStyle = this.strokeStyle;
+      ctx.fillStyle = ctx.strokeStyle;
       if (this.animateType === 'dot') {
         ctx.beginPath();
         ctx.arc(this.animateDot.x, this.animateDot.y, this.animateDotSize, 0, 2 * Math.PI, false);
@@ -190,7 +167,7 @@ export class Line extends Pen {
       ctx.beginPath();
       ctx.lineDashOffset = 0;
       ctx.setLineDash([]);
-      ctx.fillStyle = this.fromArrowColor || this.strokeStyle || ctx.strokeStyle;
+      ctx.fillStyle = this.fromArrowColor || ctx.strokeStyle;
       ctx.strokeStyle = ctx.fillStyle;
       let f = this.to;
       if (this.name === 'curve') {
@@ -212,7 +189,7 @@ export class Line extends Pen {
       ctx.beginPath();
       ctx.lineDashOffset = 0;
       ctx.setLineDash([]);
-      ctx.fillStyle = this.toArrowColor || this.strokeStyle || ctx.strokeStyle;
+      ctx.fillStyle = this.toArrowColor || ctx.strokeStyle;
       ctx.strokeStyle = ctx.fillStyle;
       let f = this.from;
       if (this.name === 'curve') {
@@ -229,7 +206,7 @@ export class Line extends Pen {
           this.from,
           this.controlPoints[0],
           this.controlPoints[1],
-          this.controlPoints[2]
+          this.to
         );
       } else if (this.name !== 'line' && this.controlPoints.length) {
         f = this.controlPoints[this.controlPoints.length - 1];
@@ -246,7 +223,7 @@ export class Line extends Pen {
     }
   }
 
-  pointIn(pt: Point) {
+  pointIn(pt: { x: number; y: number; }) {
     return drawLineFns[this.name].pointIn(pt, this);
   }
 
@@ -267,9 +244,13 @@ export class Line extends Pen {
         }
         len += lineLen(curPt, this.to);
         return len | 0;
-
       case 'curve':
+      case 'mind':
         return curveLen(this.from, this.controlPoints[0], this.controlPoints[1], this.to);
+      default:
+        if (drawLineFns[this.name].getLength) {
+          return drawLineFns[this.name].getLength(this);
+        }
     }
 
     return 0;
@@ -282,8 +263,8 @@ export class Line extends Pen {
       width = 100;
     }
     const height =
-      this.font.lineHeight *
-      this.font.fontSize *
+      this.lineHeight *
+      this.fontSize *
       (this.textMaxLine || (this.text && this.text.split('\n').length) || 1);
     this.textRect = new Rect(center.x - width / 2, center.y - height / 2, width, height);
   }
@@ -306,6 +287,11 @@ export class Line extends Pen {
         break;
       case 'curve':
         center = getBezierPoint(0.5, this.to, this.controlPoints[1], this.controlPoints[0], this.from);
+        break;
+      default:
+        if (drawLineFns[this.name].getCenter) {
+          center = drawLineFns[this.name].getCenter(this);
+        }
     }
 
     return center;
@@ -341,6 +327,48 @@ export class Line extends Pen {
         }
       case 'curve':
         return getBezierPoint(pos / this.getLen(), this.from, this.controlPoints[0], this.controlPoints[1], this.to);
+      default:
+        if (drawLineFns[this.name].getPointByPos) {
+          return drawLineFns[this.name].getPointByPos(pos, this);
+        }
+    }
+    return null;
+  }
+
+  getPointByReversePos(pos: number): Point {
+    if (pos <= 0) {
+      return this.to;
+    }
+    switch (this.name) {
+      case 'line':
+        return this.getLinePtByPos(this.to, this.from, pos);
+      case 'polyline':
+        if (!this.controlPoints || !this.controlPoints.length) {
+          return this.getLinePtByPos(this.to, this.from, pos);
+        } else {
+          const points: Point[] = [];
+          this.controlPoints.forEach(item => {
+            points.unshift(item);
+          });
+          points.unshift(this.to);
+          let curPt = this.to;
+          for (const pt of points) {
+            const l = lineLen(curPt, pt);
+            if (pos > l) {
+              pos -= l;
+              curPt = pt;
+            } else {
+              return this.getLinePtByPos(curPt, pt, pos);
+            }
+          }
+          return this.from;
+        }
+      case 'curve':
+        return getBezierPoint(pos / this.getLen(), this.to, this.controlPoints[1], this.controlPoints[0], this.from);
+      default:
+        if (drawLineFns[this.name].getPointByReversePos) {
+          return drawLineFns[this.name].getPointByReversePos(pos, this);
+        }
     }
     return null;
   }
@@ -399,15 +427,39 @@ export class Line extends Pen {
     this.translate(x - this.from.x, y - this.from.y);
   }
 
+  initAnimate() {
+    this.animateStart = 0;
+    this.animateDot = undefined;
+    this.animatePos = 0;
+  }
+
+  pauseAnimate() {
+    Store.set(this.generateStoreKey('LT:AnimatePlay'), {
+      pen: this,
+      stop: true,
+    });
+  }
+
+  stopAnimate() {
+    this.pauseAnimate();
+    this.initAnimate();
+    setTimeout(() => {
+      Store.set(this.generateStoreKey('LT:render'), {
+        pen: this,
+        stop: true,
+      });
+    }, 50);
+  }
+
   animate(now: number) {
-    if (this.animateFromSize) {
-      this.lineDashOffset = -this.animateFromSize;
-    }
     this.animatePos += this.animateSpan;
-    this.animateDot = null;
     switch (this.animateType) {
       case 'beads':
-        this.lineDashOffset = -this.animatePos;
+        if (this.animateReverse) {
+          this.lineDashOffset = this.animatePos;
+        } else {
+          this.lineDashOffset = -this.animatePos;
+        }
         let len = this.lineWidth;
         if (len < 5) {
           len = 5;
@@ -420,21 +472,30 @@ export class Line extends Pen {
         break;
       case 'dot':
       case 'comet':
-        this.lineDash = null;
-        this.animateDot = this.getPointByPos(this.animatePos + this.animateFromSize);
+        this.lineDash = undefined;
+        let pos: any;
+        if (this.animateReverse) {
+          pos = this.getPointByReversePos(this.animatePos + this.animateToSize);
+        } else {
+          pos = this.getPointByPos(this.animatePos + this.animateFromSize);
+        }
+        this.animateDot = pos;
         break;
       default:
-        this.lineDash = [this.animatePos, this.length - this.animatePos + 1];
+        if (this.animateReverse) {
+          this.lineDash = [0, this.length - this.animatePos + 1, this.animatePos];
+        } else {
+          this.lineDash = [this.animatePos, this.length - this.animatePos + 1];
+        }
         break;
     }
 
     if (this.animatePos > this.length + this.animateSpan - this.animateFromSize - this.animateToSize) {
       if (++this.animateCycleIndex >= this.animateCycle && this.animateCycle > 0) {
         this.animateStart = 0;
-        Store.set(this.generateStoreKey('animateEnd'), {
-          type: 'line',
-          data: this,
-        });
+        this.initAnimate();
+
+        Store.set(this.generateStoreKey('animateEnd'), this);
         return;
       }
 
@@ -444,12 +505,21 @@ export class Line extends Pen {
 
   getBubbles() {
     const bubbles: any[] = [];
+
     for (let i = 0; i < 30 && this.animatePos - i > 0; ++i) {
-      bubbles.push({
-        pos: this.getPointByPos(this.animatePos - i * 2 + this.animateFromSize),
-        a: 1 - i * 0.03,
-        r: this.lineWidth - i * 0.01,
-      });
+      if (this.animateReverse) {
+        bubbles.push({
+          pos: this.getPointByReversePos(this.animatePos - i * 2 + this.animateToSize),
+          a: 1 - i * 0.03,
+          r: this.lineWidth - i * 0.01,
+        });
+      } else {
+        bubbles.push({
+          pos: this.getPointByPos(this.animatePos - i * 2 + this.animateFromSize),
+          a: 1 - i * 0.03,
+          r: this.lineWidth - i * 0.01,
+        });
+      }
     }
 
     return bubbles;
@@ -461,40 +531,58 @@ export class Line extends Pen {
   }
 
   translate(x: number, y: number) {
-    this.from.x += x;
-    this.from.y += y;
-    this.to.x += x;
-    this.to.y += y;
-    if (this.text) {
-      this.textRect = null;
+    if (this.from) {
+      this.from.x += x;
+      this.from.y += y;
+      this.to.x += x;
+      this.to.y += y;
+      if (this.text) {
+        this.textRect = undefined;
+      }
+
+      for (const pt of this.controlPoints) {
+        pt.x += x;
+        pt.y += y;
+      }
     }
 
-    for (const pt of this.controlPoints) {
-      pt.x += x;
-      pt.y += y;
+    if (this.children) {
+      for (const item of this.children) {
+        item.translate(x, y);
+      }
     }
 
-    Store.set(this.generateStoreKey('pts-') + this.id, null);
+    Store.set(this.generateStoreKey('pts-') + this.id, undefined);
   }
 
-  scale(scale: number, center: Point) {
-    this.from.x = center.x - (center.x - this.from.x) * scale;
-    this.from.y = center.y - (center.y - this.from.y) * scale;
-    this.to.x = center.x - (center.x - this.to.x) * scale;
-    this.to.y = center.y - (center.y - this.to.y) * scale;
-    this.lineWidth *= scale;
-    this.borderWidth *= scale;
-    if (this.text && this.font && this.font.fontSize) {
-      this.font.fontSize *= scale;
-      this.textRect = null;
+  scale(scale: number, center: { x: number; y: number; }) {
+    if (this.from) {
+      this.from.x = center.x - (center.x - this.from.x) * scale;
+      this.from.y = center.y - (center.y - this.from.y) * scale;
+      this.to.x = center.x - (center.x - this.to.x) * scale;
+      this.to.y = center.y - (center.y - this.to.y) * scale;
+      this.lineWidth *= scale;
+      this.borderWidth *= scale;
+      this.fontSize *= scale;
+      if (this.text) {
+        this.textRect = undefined;
+      }
+      this.textOffsetX *= scale;
+      this.textOffsetY *= scale;
+
+      for (const pt of this.controlPoints) {
+        pt.x = center.x - (center.x - pt.x) * scale;
+        pt.y = center.y - (center.y - pt.y) * scale;
+      }
     }
 
-    for (const pt of this.controlPoints) {
-      pt.x = center.x - (center.x - pt.x) * scale;
-      pt.y = center.y - (center.y - pt.y) * scale;
+    if (this.children) {
+      for (const item of this.children) {
+        item.scale(scale, center);
+      }
     }
 
-    Store.set(this.generateStoreKey('pts-') + this.id, null);
+    Store.set(this.generateStoreKey('pts-') + this.id, undefined);
   }
 
   hit(pt: Point, padding = 0): any {

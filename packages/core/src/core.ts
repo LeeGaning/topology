@@ -1,14 +1,14 @@
 import { Store, Observer } from 'le5le-store';
 // https://github.com/developit/mitt
 import { default as mitt, Emitter, EventType, Handler } from 'mitt';
-import { Options, KeyType, KeydownType, DefalutOptions, Padding } from './options';
+import { Options, KeyType, KeydownType, DefalutOptions, Padding, fontKeys } from './options';
 import { Pen, PenType } from './models/pen';
 import { Node } from './models/node';
 import { Point } from './models/point';
 import { Line } from './models/line';
-import { TopologyData } from './models/data';
+import { createData, TopologyData } from './models/data';
 import { Lock, AnchorMode } from './models/status';
-import { drawNodeFns, drawLineFns } from './middles/index';
+import { drawNodeFns, drawLineFns, calcTextRect } from './middles';
 import { Offscreen } from './offscreen';
 import { RenderLayer } from './renderLayer';
 import { HoverLayer } from './hoverLayer';
@@ -17,18 +17,20 @@ import { AnimateLayer } from './animateLayer';
 import { DivLayer } from './divLayer';
 import { Rect } from './models/rect';
 import { s8 } from './utils/uuid';
-import { find, getParent, pointInRect } from './utils/canvas';
-import { getRect } from './utils/rect';
+import { del, find, getParent, pointInRect } from './utils/canvas';
+import { getBboxOfPoints, getRect } from './utils/rect';
 import { formatPadding } from './utils/padding';
 import { Socket } from './socket';
 // import { MQTT } from './mqtt';
-import { Direction } from './models';
+import { Direction, EventType as SocketEventType } from './models';
+import { isMobile } from './utils';
+
+declare const window: any;
 
 const resizeCursors = ['nw-resize', 'ne-resize', 'se-resize', 'sw-resize'];
 enum MoveInType {
   None,
   Line,
-  LineMove,
   LineFrom,
   LineTo,
   LineControlPoint,
@@ -37,6 +39,10 @@ enum MoveInType {
   HoverAnchors,
   AutoAnchor,
   Rotate,
+  GraffitiReady,
+  Graffiti,
+  LinesReady,
+  Lines
 }
 
 interface ICaches {
@@ -47,8 +53,8 @@ interface ICaches {
 const dockOffset = 10;
 
 export class Topology {
-  id: String;
-  data: TopologyData = new TopologyData();
+  id = s8();
+  data: TopologyData = createData(undefined, this.id);
   clipboard: TopologyData;
   caches: ICaches = {
     index: 0,
@@ -71,13 +77,20 @@ export class Topology {
   private subcribeAnimateEnd: Observer;
   private subcribeAnimateMoved: Observer;
   private subcribeMediaEnd: Observer;
+  private subcribeEmit: Observer;
 
   touchedNode: any;
   lastHoverNode: Node;
   lastHoverLine: Line;
+  touches?: TouchList;
+  touchScale?: number;
+  touchStart = 0;
+  touchCenter?: { x: number; y: number; };
+
   input = document.createElement('textarea');
   inputObj: Pen;
-  mouseDown: { x: number; y: number; restore?: boolean };
+  mouseDown: { x: number; y: number; restore?: boolean; };
+  spaceDown: boolean;
   lastTranlated = { x: 0, y: 0 };
   moveIn: {
     type: MoveInType;
@@ -88,41 +101,62 @@ export class Topology {
     activeNode: Node;
     lineControlPoint: Point;
   } = {
-    type: MoveInType.None,
-    activeAnchorIndex: 0,
-    hoverAnchorIndex: 0,
-    hoverNode: null,
-    hoverLine: null,
-    activeNode: null,
-    lineControlPoint: null,
-  };
+      type: MoveInType.None,
+      activeAnchorIndex: 0,
+      hoverAnchorIndex: 0,
+      hoverNode: undefined,
+      hoverLine: undefined,
+      activeNode: undefined,
+      lineControlPoint: undefined,
+    };
+  canvasPos?: DOMRect;
+
   needCache = false;
 
   private tip = '';
   private raf: number;
   tipMarkdown: HTMLElement;
+  tipMarkdownContent: HTMLElement;
+  tipMarkdownArrowUp: HTMLElement;
+  tipMarkdownArrowDown: HTMLElement;
   tipElem: HTMLElement;
-  gridElem: HTMLElement = document.createElement('div');
 
   socket: Socket;
-  // mqtt: MQTT;
+  mqtt: undefined;
+
+  private socketFn: Function;
+
   _emitter: Emitter;
 
   private scheduledAnimationFrame = false;
   private scrolling = false;
   private rendering = false;
-  constructor(parent: string | HTMLElement, options?: Options) {
-    this.id = s8();
+  private actionTimer: any;
+  constructor(parent: string | HTMLElement, options: Options = {}) {
     this._emitter = mitt();
-    Store.set(this.generateStoreKey('topology-data'), this.data);
-
-    if (!options) {
-      options = {};
-    }
-    const font = Object.assign({}, DefalutOptions.font, options.font);
-    options.font = font;
     this.options = Object.assign({}, DefalutOptions, options);
+    Store.set(this.generateStoreKey('LT:color'), this.options.color || '#222222');
+    Store.set(this.generateStoreKey('LT:fontColor'), this.options.fontColor || '#222222');
 
+    this.setupDom(parent);
+    this.setupSubscribe();
+    this.setupMouseEvent();
+
+    // Wait for parent dom load
+    setTimeout(() => {
+      this.canvasPos = this.divLayer.canvas.getBoundingClientRect();
+    }, 500);
+    setTimeout(() => {
+      this.canvasPos = this.divLayer.canvas.getBoundingClientRect();
+    }, 1000);
+
+    this.cache();
+
+    window.topology = this;
+    this.dispatch('loaded');
+  }
+
+  private setupDom(parent: string | HTMLElement) {
     if (typeof parent === 'string') {
       this.parentElem = document.getElementById(parent);
     } else {
@@ -130,7 +164,8 @@ export class Topology {
     }
     this.parentElem.style.position = 'relative';
     this.parentElem.style.overflow = 'auto';
-    this.createGrid();
+    this.parentElem.onresize = this.winResize;
+    window.addEventListener('resize', this.winResize);
 
     const id = this.id;
     this.activeLayer = new ActiveLayer(this.options, id);
@@ -141,21 +176,22 @@ export class Topology {
     this.canvas = new RenderLayer(this.parentElem, this.options, id);
     this.divLayer = new DivLayer(this.parentElem, this.options, id);
 
-    this.resize();
+    this.input.style.position = 'absolute';
+    this.input.style.zIndex = '-1';
+    this.input.style.left = '-1000px';
+    this.input.style.width = '0';
+    this.input.style.height = '0';
+    this.input.style.outline = 'none';
+    this.input.style.border = '1px solid #cdcdcd';
+    this.input.style.resize = 'none';
+    this.parentElem.appendChild(this.input);
 
-    this.divLayer.canvas.ondragover = (event) => event.preventDefault();
-    this.divLayer.canvas.ondrop = (event) => {
-      if (this.data.locked) {
-        return;
-      }
-      try {
-        const json = event.dataTransfer.getData('Topology') || event.dataTransfer.getData('Text');
-        if (!json) return;
-        const obj = JSON.parse(json);
-        event.preventDefault();
-        this.dropNodes(Array.isArray(obj) ? obj : [obj], event.offsetX, event.offsetY);
-      } catch {}
-    };
+    this.createMarkdownTip();
+
+    this.resize();
+  }
+
+  private setupSubscribe() {
     this.subcribe = Store.subscribe(this.generateStoreKey('LT:render'), () => {
       this.render();
     });
@@ -180,36 +216,226 @@ export class Topology {
       }
       this.dispatch('mediaEnd', node);
     });
-    this.subcribeAnimateEnd = Store.subscribe(this.generateStoreKey('animateEnd'), (e: any) => {
-      if (!e) {
+    this.subcribeAnimateEnd = Store.subscribe(this.generateStoreKey('animateEnd'), (pen: Pen) => {
+      if (!pen) {
         return;
       }
-      switch (e.type) {
-        case 'node':
+      switch (pen.type) {
+        case PenType.Node:
           this.offscreen.render();
           break;
       }
-      this.divLayer.playNext(e.data.nextAnimate);
-      this.dispatch('animateEnd', e);
+      this.dispatch('animateEnd', pen);
     });
+    this.subcribeEmit = Store.subscribe(this.generateStoreKey('LT:emit'), (e: {
+      event: string,
+      pen: Pen,
+      params: string;
+    }) => {
+      this.emit(e.event, e);
+    });
+  }
 
-    this.divLayer.canvas.onmousemove = this.onMouseMove;
-    this.divLayer.canvas.onmousedown = this.onmousedown;
-    this.divLayer.canvas.onmouseup = this.onmouseup;
+  private setupMouseEvent() {
+    this.canvasPos = this.divLayer.canvas.getBoundingClientRect();
+    this.parentElem.addEventListener('scroll', this.onScroll);
+    window.addEventListener('scroll', this.onScroll);
+
+    this.divLayer.canvas.ondragover = (event) => event.preventDefault();
+    this.divLayer.canvas.ondrop = (event) => {
+      if (this.data.locked) {
+        return;
+      }
+      try {
+        const json = event.dataTransfer.getData('Topology') || event.dataTransfer.getData('Text');
+        if (!json) return;
+        const obj = JSON.parse(json);
+        event.preventDefault();
+
+        this.dropNodes(Array.isArray(obj) ? obj : [obj], event.offsetX, event.offsetY);
+      } catch { }
+    };
+
+    if (isMobile()) {
+      this.options.refresh = 50;
+
+      // ipad
+      document.addEventListener('gesturestart', this.preventDefault);
+      // end
+
+      this.divLayer.canvas.ontouchstart = (event) => {
+        this.touchStart = Date.now();
+        const pos = new Point(
+          event.changedTouches[0].pageX - window.scrollX - (this.canvasPos.left || this.canvasPos.x),
+          event.changedTouches[0].pageY - window.scrollY - (this.canvasPos.top || this.canvasPos.y)
+        );
+
+        if (event.touches.length > 1) {
+          this.touches = event.touches;
+          this.touchScale = this.data.scale;
+
+          this.lastTranlated.x = pos.x;
+          this.lastTranlated.y = pos.y;
+
+          return;
+        }
+
+        this.getMoveIn(pos);
+        this.hoverLayer.node = this.moveIn.hoverNode;
+        this.hoverLayer.line = this.moveIn.hoverLine;
+
+        this.lastTranlated.x = pos.x;
+        this.lastTranlated.y = pos.y;
+        this.onmousedown({
+          x: pos.x,
+          y: pos.y,
+          ctrlKey: event.ctrlKey || event.metaKey,
+          shiftKey: event.shiftKey,
+          altKey: event.altKey,
+          button: 0,
+        });
+      };
+
+      this.divLayer.canvas.ontouchmove = (event) => {
+        event.stopPropagation();
+
+        const touches = event.changedTouches;
+        const len = touches.length;
+        if (!this.touchCenter && len > 1) {
+          this.touchCenter = {
+            x: touches[0].pageX + (touches[1].pageX - touches[0].pageX) / 2,
+            y: touches[0].pageY + (touches[1].pageY - touches[0].pageY) / 2,
+          };
+        }
+
+        const timeNow = Date.now();
+        if (timeNow - this.touchStart < 50) {
+          return;
+        }
+
+        if (len > 1) {
+          if (len === 2) {
+            const scale =
+              (event as any).scale ||
+              Math.hypot(touches[0].pageX - touches[1].pageX, touches[0].pageY - touches[1].pageY) /
+              Math.hypot(
+                this.touches[0].pageX - this.touches[1].pageX,
+                this.touches[0].pageY - this.touches[1].pageY
+              );
+            event.preventDefault();
+            this.scaleTo(scale * this.touchScale, this.touchCenter);
+          } else if (len === 3) {
+            const pos = new Point(
+              touches[0].pageX - window.scrollX - (this.canvasPos.left || this.canvasPos.x),
+              touches[0].pageY - window.scrollY - (this.canvasPos.top || this.canvasPos.y)
+            );
+
+            this.translate(pos.x, pos.y, true);
+          }
+
+          return;
+        }
+
+        event.preventDefault();
+
+        const pos = new Point(
+          event.changedTouches[0].pageX - window.scrollX - (this.canvasPos.left || this.canvasPos.x),
+          event.changedTouches[0].pageY - window.scrollY - (this.canvasPos.top || this.canvasPos.y)
+        );
+
+        this.onMouseMove({
+          x: pos.x,
+          y: pos.y,
+          ctrlKey: event.ctrlKey || event.metaKey,
+          shiftKey: event.shiftKey,
+          altKey: event.altKey,
+          buttons: 1,
+        });
+      };
+
+      this.divLayer.canvas.ontouchend = (event) => {
+        this.touches = undefined;
+        this.ontouchend(event);
+      };
+    } else {
+      this.divLayer.canvas.onmousedown = (event: MouseEvent) => {
+        if (this.touchedNode) {
+          if (this.touchedNode.name === 'graffiti') {
+            this.touchedNode.rect = new Rect(0, 0, 0, 0);
+            this.addNode(this.touchedNode);
+            this.touchedNode = undefined;
+          } else if (this.touchedNode.name === 'lines') {
+            this.addLine(this.touchedNode);
+            this.touchedNode = undefined;
+          }
+        }
+
+        const e = {
+          x: event.pageX - window.scrollX - (this.canvasPos.left || this.canvasPos.x),
+          y: event.pageY - window.scrollY - (this.canvasPos.top || this.canvasPos.y),
+          ctrlKey: event.ctrlKey || event.metaKey,
+          shiftKey: event.shiftKey,
+          altKey: event.altKey,
+          button: event.button,
+        };
+        this.lastTranlated.x = e.x;
+        this.lastTranlated.y = e.y;
+        this.onmousedown(e);
+      };
+      this.divLayer.canvas.onmousemove = (event: MouseEvent) => {
+        this.onMouseMove({
+          x: event.pageX - window.scrollX - (this.canvasPos.left || this.canvasPos.x),
+          y: event.pageY - window.scrollY - (this.canvasPos.top || this.canvasPos.y),
+          ctrlKey: event.ctrlKey || event.metaKey,
+          shiftKey: event.shiftKey,
+          altKey: event.altKey,
+          buttons: event.buttons,
+        });
+      };
+      this.divLayer.canvas.onmouseup = (event: MouseEvent) => {
+        const e = {
+          x: event.pageX - window.scrollX - (this.canvasPos.left || this.canvasPos.x),
+          y: event.pageY - window.scrollY - (this.canvasPos.top || this.canvasPos.y),
+          ctrlKey: event.ctrlKey || event.metaKey,
+          shiftKey: event.shiftKey,
+          altKey: event.altKey,
+          button: event.button,
+        };
+        this.onmouseup(e);
+
+        if (!this.touchedNode) {
+          return;
+        }
+
+        this.touchedNode.rect.x = event.pageX - window.scrollX - this.canvasPos.x - this.touchedNode.rect.width / 2;
+        this.touchedNode.rect.y = event.pageY - window.scrollY - this.canvasPos.y - this.touchedNode.rect.height / 2;
+
+        const node = new Node(this.touchedNode);
+        this.addNode(node, true);
+        this.touchedNode = undefined;
+      };
+    }
+
     this.divLayer.canvas.ondblclick = this.ondblclick;
     this.divLayer.canvas.tabIndex = 0;
     this.divLayer.canvas.onblur = () => {
-      this.mouseDown = null;
+      this.mouseDown = undefined;
     };
     this.divLayer.canvas.onwheel = (event) => {
+      const timeNow = new Date().getTime();
+      if (timeNow - this.touchStart < 20) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      this.touchStart = new Date().getTime();
+
       if (this.options.disableScale) {
         return;
       }
       switch (this.options.scaleKey) {
-        case KeyType.None:
-          break;
         case KeyType.Ctrl:
-          if (!event.ctrlKey) {
+          if (!event.ctrlKey && !event.metaKey) {
             return;
           }
           break;
@@ -223,60 +449,75 @@ export class Topology {
             return;
           }
           break;
-        case KeyType.Any:
-          break;
-        default:
-          if (!event.ctrlKey && !event.altKey) {
-            return;
-          }
       }
 
       event.preventDefault();
       event.stopPropagation();
 
-      const canvasPos = this.divLayer.canvas.getBoundingClientRect() as DOMRect;
-      const pos = new Point(event.x - (canvasPos.x || canvasPos.left), event.y - (canvasPos.y || canvasPos.top));
+      const pos = new Point(
+        event.x - window.scrollX - (this.canvasPos.left || this.canvasPos.x),
+        event.y - window.scrollY - (this.canvasPos.top || this.canvasPos.y)
+      );
+      let scale = this.data.scale;
       if (event.deltaY < 0) {
-        this.scale(1.1, pos);
+        scale += 0.1;
       } else {
-        this.scale(0.9, pos);
+        scale -= 0.1;
       }
-
+      this.scaleTo(scale, pos);
       this.divLayer.canvas.focus();
 
       return false;
     };
 
-    this.divLayer.canvas.ontouchend = (event) => {
-      this.ontouched(event);
-    };
-
     switch (this.options.keydown) {
       case KeydownType.Document:
-        document.onkeydown = this.onkeydown;
+        document.addEventListener('keydown', this.onkeydown);
+        document.addEventListener('keyup', () => {
+          this.spaceDown = false;
+        });
         break;
       case KeydownType.Canvas:
-        this.divLayer.canvas.onkeydown = this.onkeydown;
+        this.divLayer.canvas.addEventListener('keydown', this.onkeydown);
         break;
     }
+  }
 
-    this.input.style.position = 'absolute';
-    this.input.style.zIndex = '-1';
-    this.input.style.left = '-1000px';
-    this.input.style.width = '0';
-    this.input.style.height = '0';
-    this.input.style.outline = 'none';
-    this.input.style.border = '1px solid #cdcdcd';
-    this.input.style.resize = 'none';
-    this.parentElem.appendChild(this.input);
+  private onScroll = () => {
+    this.canvasPos = this.divLayer.canvas.getBoundingClientRect();
+  };
 
-    this.createMarkdownTip();
+  private preventDefault = (event: any) => {
+    event.preventDefault();
+  };
 
-    this.cache();
+  private ontouchend(event: TouchEvent) {
+    const pos = new Point(
+      event.changedTouches[0].pageX - window.scrollX - (this.canvasPos.left || this.canvasPos.x),
+      event.changedTouches[0].pageY - window.scrollY - (this.canvasPos.top || this.canvasPos.y)
+    );
 
-    this.parentElem.onresize = this.winResize;
-    window.addEventListener('resize', this.winResize);
-    (window as any).topology = this;
+    this.onmouseup({
+      x: pos.x,
+      y: pos.y,
+      ctrlKey: event.ctrlKey || event.metaKey,
+      shiftKey: event.shiftKey,
+      altKey: event.altKey,
+      button: 0,
+    });
+
+    if (!this.touchedNode) {
+      return;
+    }
+
+    this.touchedNode.rect.x =
+      event.changedTouches[0].pageX - window.scrollX - this.canvasPos.x - this.touchedNode.rect.width / 2;
+    this.touchedNode.rect.y =
+      event.changedTouches[0].pageY - window.scrollY - this.canvasPos.y - this.touchedNode.rect.height / 2;
+
+    const node = new Node(this.touchedNode);
+    this.addNode(node, true);
+    this.touchedNode = undefined;
   }
 
   winResize = () => {
@@ -286,29 +527,42 @@ export class Topology {
     }
     timer = setTimeout(() => {
       this.resize();
-      this.overflow();
     }, 100);
   };
 
-  resize(size?: { width: number; height: number }) {
+  resize(size?: { width: number; height: number; }) {
     this.canvas.resize(size);
     this.offscreen.resize(size);
     this.divLayer.resize(size);
 
     this.render();
-    this.showGrid();
     this.dispatch('resize', size);
   }
 
   dropNodes(jsonList: any[], offsetX: number, offsetY: number) {
-    let x: number, y: number;
-    if (jsonList.length) {
+    let x = 0, y = 0;
+    if (jsonList.length && jsonList[0].rect) {
       const rect = jsonList[0].rect;
       x = rect.x;
       y = rect.y;
     }
     let firstNode;
     jsonList.forEach((json) => {
+      json.id = s8();
+      if (json.name === 'graffiti') {
+        json.rect = new Rect(0, 0, 0, 0);
+        this.addNode(json);
+        return;
+      } else if (json.name === 'lines') {
+        this.addLine(json);
+        this.mouseDown = {
+          x: offsetX,
+          y: offsetY
+        };
+        this.onmouseup(this.mouseDown);
+        return;
+      }
+
       if (!firstNode) {
         json.rect.x = (offsetX - json.rect.width / 2) << 0;
         json.rect.y = (offsetY - json.rect.height / 2) << 0;
@@ -338,51 +592,19 @@ export class Topology {
           true
         );
       } else {
-        const node = new Node(json);
-        node.setTID(this.id);
-        node.clearChildrenIds();
-        this.addNode(node, true);
-        if (node.name === 'div') {
-          this.dispatch('LT:addDiv', node);
-        }
+        this.addNode(json, true);
       }
     });
 
     this.divLayer.canvas.focus();
   }
 
-  getTouchOffset(touch: Touch) {
-    let currentTarget: any = this.parentElem;
-    let x = 0;
-    let y = 0;
-    while (currentTarget) {
-      x += currentTarget.offsetLeft;
-      y += currentTarget.offsetTop;
-      currentTarget = currentTarget.offsetParent;
-    }
-    return { offsetX: touch.pageX - x, offsetY: touch.pageY - y };
-  }
-
-  private ontouched(event: TouchEvent) {
-    if (!this.touchedNode) {
-      return;
-    }
-
-    const pos = this.getTouchOffset(event.changedTouches[0]);
-    this.touchedNode.rect.x = pos.offsetX - this.touchedNode.rect.width / 2;
-    this.touchedNode.rect.y = pos.offsetY - this.touchedNode.rect.height / 2;
-
-    const node = new Node(this.touchedNode);
-    node.setTID(this.id);
-    node.clearChildrenIds();
-    this.addNode(node, true);
-    this.touchedNode = undefined;
-  }
-
   addNode(node: Node | any, focus = false) {
     if (!drawNodeFns[node.name]) {
       return null;
     }
+
+    node.TID = this.id;
 
     // if it's not a Node
     if (!node.init) {
@@ -393,11 +615,11 @@ export class Topology {
       node.strokeStyle = this.options.color;
     }
 
-    for (const key in node.font) {
-      if (!node.font[key]) {
-        node.font[key] = this.options.font[key];
+    fontKeys.forEach((key: string) => {
+      if (!node[key]) {
+        node[key] = this.options[key];
       }
-    }
+    });
 
     if (this.data.scale !== 1) {
       node.scale(this.data.scale);
@@ -406,12 +628,28 @@ export class Topology {
     this.data.pens.push(node);
 
     if (focus) {
-      this.activeLayer.setPens([node]);
+      // fix bug: add echart
+      if (node.name === 'echarts') {
+        setTimeout(() => {
+          this.activeLayer.pens = [node];
+          this.render();
+        }, 50);
+      } else {
+        this.activeLayer.pens = [node];
+      }
+    }
+
+    if (node.name !== 'graffiti' || !node.doing) {
       this.render();
       this.animate(true);
       this.cache();
-      this.dispatch('addNode', node);
+    } else {
+      this.moveIn.type = MoveInType.Graffiti;
+      this.moveIn.hoverNode = node;
     }
+
+
+    this.dispatch('addNode', node);
 
     return node;
   }
@@ -420,19 +658,34 @@ export class Topology {
     if (this.data.locked) {
       return null;
     }
+    if (line.type === PenType.Node) {
+      line.isNode = true;
+    }
 
+    line.TID = this.id;
     if (!line.clone) {
       line = new Line(line);
       line.calcControlPoints(true);
     }
+
+    if (this.data.scale !== 1) {
+      line.fontSize *= this.data.scale;
+    }
     this.data.pens.push(line);
 
-    if (focus) {
-      this.activeLayer.setPens([line]);
-      this.render();
-      this.animate(true);
-      this.cache();
-      this.dispatch('addLine', line);
+    if (line.name !== 'lines' || !line.doing) {
+      if (focus) {
+        this.activeLayer.setPens([line]);
+        this.render();
+        this.animate(true);
+        this.cache();
+        this.dispatch('addLine', line);
+      }
+    } else {
+      this.activeLayer.clear();
+      this.hoverLayer.line = undefined;
+      this.moveIn.type = MoveInType.Lines;
+      this.moveIn.hoverLine = line;
     }
 
     return line;
@@ -442,8 +695,8 @@ export class Topology {
   render(noFocus = false) {
     if (noFocus) {
       this.activeLayer.pens = [];
-      this.hoverLayer.node = null;
-      this.hoverLayer.line = null;
+      this.hoverLayer.node = undefined;
+      this.hoverLayer.line = undefined;
     }
     if (this.rendering) {
       return this;
@@ -455,70 +708,24 @@ export class Topology {
   }
 
   // open - redraw by the data
-  open(data?: any) {
-    if (!data) {
-      data = { pens: [] };
+  open(data?: TopologyData) {
+    if (data && data.mqttOptions && !data.mqttOptions.customClientId) {
+      data.mqttOptions.clientId = s8();
     }
-    if (typeof data === 'string') {
-      data = JSON.parse(data);
-    }
+    this.canvas.clearBkImg();
+    this.data = createData(data, this.id);
+    this.subscribeSocket();
 
-    this.animateLayer.stop();
-    this.lock(data.locked || Lock.None);
-
-    if (data.lineName) {
-      this.data.lineName = data.lineName;
-    }
-    this.data.fromArrow = data.fromArrow;
-    this.data.toArrow = data.toArrow;
-
-    this.data.scale = data.scale || 1;
     Store.set(this.generateStoreKey('LT:scale'), this.data.scale);
     this.dispatch('scale', this.data.scale);
-
-    this.data.bkColor = data.bkColor;
-    this.data.bkImage = data.bkImage;
-    this.data.tooltip = data.tooltip;
-    this.data.pens = [];
-
-    // for old data.
-    if (data.nodes) {
-      for (const item of data.nodes) {
-        this.data.pens.push(new Node(item));
-      }
-      for (const item of data.lines) {
-        this.data.pens.push(new Line(item));
-      }
-    }
-    // end.
-
-    if (data.pens) {
-      for (const item of data.pens) {
-        if (!item.from) {
-          this.data.pens.push(new Node(item));
-        } else {
-          this.data.pens.push(new Line(item));
-        }
-      }
-    }
-
-    this.data.websocket = data.websocket;
-    // this.data.mqttUrl = data.mqttUrl;
-    // this.data.mqttOptions = data.mqttOptions || { clientId: s8() };
-    // this.data.mqttTopics = data.mqttTopics;
-    this.data.grid = data.grid;
-    if (typeof data.data === 'object') {
-      this.data.data = JSON.parse(JSON.stringify(data.data));
-    } else {
-      this.data.data = data.data || '';
-    }
+    Store.set('LT:bkColor', this.data.bkColor);
+    this.lock(this.data.locked);
 
     this.caches.list = [];
     this.cache();
 
     this.divLayer.clear();
-
-    this.overflow();
+    this.animateLayer.stop();
     this.render(true);
 
     this.parentElem.scrollLeft = 0;
@@ -526,15 +733,47 @@ export class Topology {
 
     this.animate(true);
     this.openSocket();
-    // this.openMqtt();
+    this.openMqtt();
 
-    this.showGrid();
+    this.dispatch('opened');
   }
+
+  subscribeSocket = () => {
+    if (!this.data.socketFn) {
+      return false;
+    }
+
+    if (!this.data.socketEvent) {
+      this.data.socketEvent = true;
+    }
+    try {
+      const socketFn = new Function('e', this.data.socketFn);
+      if (this.socketFn) {
+        this.off('websocket', this.socketFn as any);
+        this.off('mqtt', this.socketFn as any);
+      }
+      this.on('websocket', socketFn as any);
+      this.on('mqtt', socketFn as any);
+      this.socketFn = socketFn;
+    } catch (e) {
+      console.error('Create the function for socket:', e);
+      return false;
+    }
+
+
+
+    return true;
+  };
 
   openSocket(url?: string) {
     this.closeSocket();
     if (url || this.data.websocket) {
-      this.socket = new Socket(url || this.data.websocket, this.data);
+      this.socket = new Socket(url || this.data.websocket, (e) => {
+        if (this.data.socketEvent !== 1) {
+          this.doSocket(e.data);
+        }
+        this.data.socketEvent && this.dispatch('websocket', e.data);
+      });
     }
   }
 
@@ -544,37 +783,71 @@ export class Topology {
     }
   }
 
-  // openMqtt(url?: string, options?: any) {
-  //   this.closeMqtt();
-  //   if (url || this.data.mqttUrl) {
-  //     this.mqtt = new MQTT(url || this.data.mqttUrl, options || this.data.mqttOptions, this.data.mqttTopics, this.data);
-  //   }
-  // }
+  doSocket(message: any, type = SocketEventType.WebSocket) {
+    try {
+      message = JSON.parse(message);
+      if (!Array.isArray(message)) {
+        message = [message];
+      }
+      message.forEach((item: any) => {
+        let actions = [];
 
-  // closeMqtt() {
-  //   if (this.mqtt) {
-  //     this.mqtt.close();
-  //   }
-  // }
+        if (item.actions) {
+          actions = item.actions;
+          delete item.actions;
+        }
 
-  overflow() {
+        const pens = find(item.id || item.tag, this.data.pens);
+        pens.forEach((pen) => {
+          if (pen.id === item.id || (pen.tags && pen.tags.indexOf(item.tag) > -1)) {
+            pen.fromData(pen, item);
+            pen.doWheres();
+
+            if (pen.events) {
+              pen.events.forEach((event) => {
+                if (event.type === type) {
+                  actions.push(event);
+                }
+              });
+            }
+            actions && actions.forEach((action: any) => {
+              pen.doAction(action);
+            });
+          }
+        });
+
+        this.willRender();
+      });
+    } catch (error) {
+      console.warn(error);
+    }
+  }
+
+  overflow(padding = 50) {
     const rect = this.getRect();
-    let { width, height } = this.canvas;
-    const maxWidth = Math.max(rect.width, rect.ex);
-    const maxHeight = Math.max(rect.height, rect.ey);
-    const offset = 50;
-    if (width < maxWidth) {
-      width = maxWidth + offset;
+    let { width, height } = rect;
+    if (width < rect.ex) {
+      width = rect.ex + padding;
     }
-    if (height < maxHeight) {
-      height = maxHeight + offset;
+    if (width < this.canvas.width) {
+      width = this.canvas.width;
     }
-    this.resize({ width, height });
-    return rect;
+    if (height < rect.ey) {
+      height = rect.ey + padding;
+    }
+    if (height < this.canvas.height) {
+      height = this.canvas.height;
+    }
+    const size = { width, height };
+    this.resize(size);
+    return size;
   }
 
   private setNodeText() {
     this.inputObj.text = this.input.value;
+    if (this.inputObj.name === 'image') {
+      (this.inputObj as Node).init();
+    }
     this.input.style.zIndex = '-1';
     this.input.style.left = '-1000px';
     this.input.style.width = '0';
@@ -583,25 +856,37 @@ export class Topology {
 
     this.dispatch('setText', this.inputObj);
 
-    this.inputObj = null;
+    this.inputObj = undefined;
   }
 
-  private onMouseMove = (e: MouseEvent) => {
+  onMouseMove = (e: {
+    x: number;
+    y: number;
+    buttons?: number;
+    ctrlKey?: boolean;
+    shiftKey?: boolean;
+    altKey?: boolean;
+  }) => {
     if (this.scheduledAnimationFrame || this.data.locked === Lock.NoEvent) {
       return;
     }
 
     // https://caniuse.com/#feat=mdn-api_mouseevent_buttons
-    if (this.mouseDown && !this.mouseDown.restore && e.buttons !== 1) {
+    if (this.mouseDown && !this.mouseDown.restore && (e.buttons !== 1 && e.buttons !== 2)) {
       // 防止异常情况导致mouseup事件没有触发
       this.onmouseup(e);
       return;
     }
 
-    if (this.mouseDown && this.moveIn.type === MoveInType.None) {
-      let b = false;
+    if (this.mouseDown && (this.data.locked || this.spaceDown || !this.moveIn.type)) {
+      let b = !!this.data.locked;
       switch (this.options.translateKey) {
-        case KeyType.None:
+        case KeyType.Right:
+          if (e.buttons == 2) {
+            b = true;
+          }
+          break;
+        case KeyType.Any:
           b = true;
           break;
         case KeyType.Ctrl:
@@ -619,77 +904,88 @@ export class Topology {
             b = true;
           }
           break;
-        case KeyType.Any:
-          b = true;
-          break;
         default:
-          if (e.ctrlKey || e.altKey) {
+          if (e.ctrlKey || e.altKey || e.buttons == 2) {
             b = true;
           }
       }
-      if (b && this.data.locked < Lock.NoMove) {
-        const canvasPos = this.divLayer.canvas.getBoundingClientRect() as DOMRect;
-        this.translate(
-          e.x - this.mouseDown.x - (canvasPos.x || canvasPos.left),
-          e.y - this.mouseDown.y - (canvasPos.y || canvasPos.top),
-          true
-        );
+
+      if (this.spaceDown || (!this.options.disableTranslate && b && this.data.locked < Lock.NoMove)) {
+        this.translate(e.x, e.y, true);
         return false;
       }
     }
 
-    if (this.data.locked && this.mouseDown && this.moveIn.type !== MoveInType.None) {
+    if (this.data.locked && this.mouseDown) {
       return;
     }
 
     this.scheduledAnimationFrame = true;
-    const canvasPos = this.divLayer.canvas.getBoundingClientRect() as DOMRect;
-    const pos = new Point(e.x - (canvasPos.x || canvasPos.left), e.y - (canvasPos.y || canvasPos.top));
-
     if (this.raf) cancelAnimationFrame(this.raf);
     this.raf = requestAnimationFrame(() => {
-      this.raf = null;
+      this.raf = undefined;
+
+      if (this.moveIn.type === MoveInType.Lines) {
+        if (this.hoverLayer.line) {
+          this.hoverLayer.lineTo(new Point(e.x, e.y), '');
+          if (e.shiftKey || e.ctrlKey || e.altKey || e.buttons == 2) {
+            this.hoverLayer.line.name = 'curve';
+            this.hoverLayer.line.calcControlPoints();
+          } else {
+            this.hoverLayer.line.name = 'line';
+          }
+
+          this.render();
+        }
+        this.scheduledAnimationFrame = false;
+        return;
+      }
 
       if (!this.mouseDown) {
-        this.getMoveIn(pos);
+        this.getMoveIn(e);
 
         // Render hover anchors.
         if (this.moveIn.hoverNode !== this.lastHoverNode) {
           if (this.lastHoverNode) {
+            this.lastHoverNode.moveOut();
             // Send a move event.
             this.dispatch('moveOutNode', this.lastHoverNode);
 
             this.hideTip();
 
             // Clear hover anchors.
-            this.hoverLayer.node = null;
+            this.hoverLayer.node = undefined;
           }
           if (this.moveIn.hoverNode) {
             this.hoverLayer.node = this.moveIn.hoverNode;
+            this.moveIn.hoverNode.moveIn();
 
             // Send a move event.
             this.dispatch('moveInNode', this.moveIn.hoverNode);
 
-            this.showTip(this.moveIn.hoverNode, pos);
+            this.showTip(this.moveIn.hoverNode, e);
           }
         }
 
         if (this.moveIn.hoverLine !== this.lastHoverLine && !this.moveIn.hoverNode) {
           if (this.lastHoverLine) {
+            this.lastHoverLine.moveOut();
             this.dispatch('moveOutLine', this.lastHoverLine);
             this.hideTip();
           }
           if (this.moveIn.hoverLine) {
+            this.hoverLayer.line = this.moveIn.hoverLine;
+            this.moveIn.hoverLine.moveIn();
             this.dispatch('moveInLine', this.moveIn.hoverLine);
 
-            this.showTip(this.moveIn.hoverLine, pos);
+            this.showTip(this.moveIn.hoverLine, e);
           }
         }
 
         if (this.moveIn.type === MoveInType.LineControlPoint) {
           this.hoverLayer.hoverLineCP = this.moveIn.lineControlPoint;
         } else if (this.hoverLayer.hoverLineCP) {
-          this.hoverLayer.hoverLineCP = null;
+          this.hoverLayer.hoverLineCP = undefined;
         }
         if (
           this.moveIn.hoverNode !== this.lastHoverNode ||
@@ -705,58 +1001,37 @@ export class Topology {
       }
 
       // Move out parent element.
-      const moveOutX = pos.x + 50 > this.parentElem.clientWidth + this.parentElem.scrollLeft;
-      const moveOutY = pos.y + 50 > this.parentElem.clientHeight + this.parentElem.scrollTop;
+      const moveOutX = e.x + 50 > this.parentElem.clientWidth + this.parentElem.scrollLeft;
+      const moveOutY = e.y + 50 > this.parentElem.clientHeight + this.parentElem.scrollTop;
       if (!this.options.disableMoveOutParent && (moveOutX || moveOutY)) {
-        this.dispatch('moveOutParent', pos);
+        this.dispatch('moveOutParent', e);
 
-        if (this.options.autoExpandDistance > 0) {
-          let resize = false;
-          if (pos.x + 50 > this.divLayer.canvas.clientWidth) {
-            this.canvas.width += this.options.autoExpandDistance;
-            resize = true;
-          }
-          if (pos.y + 50 > this.divLayer.canvas.clientHeight) {
-            this.canvas.height += this.options.autoExpandDistance;
-            resize = true;
-          }
-          if (resize) {
-            this.resize({
-              width: this.canvas.width,
-              height: this.canvas.height,
-            });
-          }
-
-          this.scroll(
-            moveOutX ? this.options.autoExpandDistance / 2 : 0,
-            moveOutY ? this.options.autoExpandDistance / 2 : 0
-          );
+        let x = 0;
+        let y = 0;
+        if (e.x + 50 > this.divLayer.canvas.clientWidth) {
+          x = -5;
         }
+        if (e.y + 50 > this.divLayer.canvas.clientHeight) {
+          y = -5;
+        }
+        this.translate(x, y, false);
       }
-
-      const moveLeft = pos.x - 100 < this.parentElem.scrollLeft;
-      const moveTop = pos.y - 100 < this.parentElem.scrollTop;
-      if (moveLeft || moveTop) {
-        this.scroll(moveLeft ? -100 : 0, moveTop ? -100 : 0);
-      }
-
       this.hideTip();
       switch (this.moveIn.type) {
         case MoveInType.None:
           this.hoverLayer.dragRect = new Rect(
             this.mouseDown.x,
             this.mouseDown.y,
-            pos.x - this.mouseDown.x,
-            pos.y - this.mouseDown.y
+            e.x - this.mouseDown.x,
+            e.y - this.mouseDown.y
           );
           break;
         case MoveInType.Nodes:
           if (this.activeLayer.locked()) {
             break;
           }
-
-          const x = pos.x - this.mouseDown.x;
-          const y = pos.y - this.mouseDown.y;
+          const x = e.x - this.mouseDown.x;
+          const y = e.y - this.mouseDown.y;
           if (x || y) {
             const offset = this.getDockPos(x, y, e.ctrlKey || e.shiftKey || e.altKey);
             this.activeLayer.move(offset.x ? offset.x : x, offset.y ? offset.y : y);
@@ -764,13 +1039,16 @@ export class Topology {
           }
           break;
         case MoveInType.ResizeCP:
-          this.activeLayer.resize(this.moveIn.activeAnchorIndex, this.mouseDown, pos);
+          this.activeLayer.resize(this.moveIn.activeAnchorIndex, this.mouseDown, e);
           this.dispatch('resizePens', this.activeLayer.pens);
           this.needCache = true;
           break;
         case MoveInType.LineTo:
         case MoveInType.HoverAnchors:
         case MoveInType.AutoAnchor:
+          if (this.hoverLayer.dockAnchor && this.hoverLayer.dockAnchor.hit(e, 10)) {
+            break;
+          }
           let arrow = this.data.toArrow;
           if (this.moveIn.hoverLine) {
             arrow = this.moveIn.hoverLine.toArrow;
@@ -778,23 +1056,66 @@ export class Topology {
           if (this.hoverLayer.line) {
             this.activeLayer.pens = [this.hoverLayer.line];
           }
-          this.hoverLayer.lineTo(this.getLineDock(pos, AnchorMode.In), arrow);
+          let toId = this.hoverLayer.line.to.id;
+          if (e.ctrlKey || e.shiftKey || e.altKey) {
+            this.hoverLayer.lineTo(new Point(e.x, e.y), arrow);
+          } else {
+            const to = this.getLineDock(new Point(e.x, e.y), AnchorMode.In);
+            toId = to.id;
+            if (to.x !== this.hoverLayer.line.from.x || to.y !== this.hoverLayer.line.from.y) {
+              this.hoverLayer.lineTo(to, arrow);
+            }
+          }
+          this.hoverLayer.line.to.id = toId;
+          if (this.hoverLayer.line.parentId) {
+            const line = this.find(toId as string) as Line;
+            if (line && line.from) {
+              line.from.x = this.hoverLayer.line.to.x;
+              line.from.y = this.hoverLayer.line.to.y;
+            }
+          }
           this.needCache = true;
           break;
 
         case MoveInType.LineFrom:
-          this.hoverLayer.lineFrom(this.getLineDock(pos, AnchorMode.Out));
+          let fromId = this.hoverLayer.line.from.id;
+          if (e.ctrlKey || e.shiftKey || e.altKey) {
+            this.hoverLayer.lineFrom(new Point(e.x, e.y));
+          } else {
+            const from = this.getLineDock(new Point(e.x, e.y), AnchorMode.Out);
+            fromId = from.id;
+            this.hoverLayer.lineFrom(from);
+          }
+          this.hoverLayer.line.from.id = fromId;
+          if (this.hoverLayer.line.parentId) {
+            const line = this.find(fromId as string) as Line;
+            if (line && line.to) {
+              line.to.x = this.hoverLayer.line.from.x;
+              line.to.y = this.hoverLayer.line.from.y;
+            }
+          }
           this.needCache = true;
           break;
-        case MoveInType.LineMove:
-          this.hoverLayer.lineMove(pos, this.mouseDown);
-          this.animateLayer.updateLines([this.hoverLayer.line]);
-          this.needCache = true;
+        case MoveInType.Line:
+          {
+            const x = e.x - this.mouseDown.x;
+            const y = e.y - this.mouseDown.y;
+            if (x || y) {
+              this.activeLayer.move(x, y);
+              if (this.hoverLayer.line.children) {
+                this.animateLayer.updateLines(this.hoverLayer.line.children as Line[]);
+              } else {
+                this.animateLayer.updateLines([this.hoverLayer.line]);
+              }
+
+              this.needCache = true;
+            }
+          }
           break;
         case MoveInType.LineControlPoint:
-          this.moveIn.hoverLine.controlPoints[this.moveIn.lineControlPoint.id].x = pos.x;
-          this.moveIn.hoverLine.controlPoints[this.moveIn.lineControlPoint.id].y = pos.y;
-          this.moveIn.hoverLine.textRect = null;
+          this.moveIn.hoverLine.controlPoints[this.moveIn.lineControlPoint.id].x = e.x;
+          this.moveIn.hoverLine.controlPoints[this.moveIn.lineControlPoint.id].y = e.y;
+          this.moveIn.hoverLine.textRect = undefined;
           if (drawLineFns[this.moveIn.hoverLine.name] && drawLineFns[this.moveIn.hoverLine.name].dockControlPointFn) {
             drawLineFns[this.moveIn.hoverLine.name].dockControlPointFn(
               this.moveIn.hoverLine.controlPoints[this.moveIn.lineControlPoint.id],
@@ -806,10 +1127,13 @@ export class Topology {
           break;
         case MoveInType.Rotate:
           if (this.activeLayer.pens.length) {
-            this.activeLayer.offsetRotate(this.getAngle(pos));
+            this.activeLayer.offsetRotate(this.getAngle(e));
             this.activeLayer.updateLines();
           }
           this.needCache = true;
+          break;
+        case MoveInType.Graffiti:
+          this.moveIn.hoverNode.pushPoint(new Point(e.x, e.y));
           break;
       }
 
@@ -818,11 +1142,17 @@ export class Topology {
     });
   };
 
-  private onmousedown = (e: MouseEvent) => {
-    if (e.button !== 0) return;
+  onmousedown = (e: {
+    x: number;
+    y: number;
+    button?: number;
+    ctrlKey?: boolean;
+    shiftKey?: boolean;
+    altKey?: boolean;
+  }) => {
+    if (e.button !== 0 && e.button !== 2) return;
 
-    const canvasPos = this.divLayer.canvas.getBoundingClientRect() as DOMRect;
-    this.mouseDown = { x: e.x - (canvasPos.x || canvasPos.left), y: e.y - (canvasPos.y || canvasPos.top) };
+    this.mouseDown = e;
     if (e.altKey) {
       this.divLayer.canvas.style.cursor = 'move';
     }
@@ -848,15 +1178,13 @@ export class Topology {
           this.activeLayer.pens = [this.moveIn.hoverLine];
           this.dispatch('line', this.moveIn.hoverLine);
         }
-        if (this.data.locked || this.moveIn.hoverLine.locked) {
-          this.moveIn.hoverLine.click();
-        }
-        break;
-      case MoveInType.LineMove:
+        this.hoverLayer.line = this.moveIn.hoverLine;
         this.hoverLayer.initLine = new Line(this.moveIn.hoverLine);
         if (this.data.locked || this.moveIn.hoverLine.locked) {
           this.moveIn.hoverLine.click();
         }
+
+        break;
       // tslint:disable-next-line:no-switch-case-fall-through
       case MoveInType.LineFrom:
       case MoveInType.LineTo:
@@ -883,6 +1211,7 @@ export class Topology {
           ),
           toArrow: this.data.toArrow,
           strokeStyle: this.options.color,
+          lineWidth: this.data.lineWidth,
         });
         this.dispatch('anchor', {
           anchor: this.moveIn.hoverNode.rotatedAnchors[this.moveIn.hoverAnchorIndex],
@@ -906,6 +1235,7 @@ export class Topology {
           to: new Point(this.moveIn.hoverNode.rect.center.x, this.moveIn.hoverNode.rect.center.y),
           toArrow: this.data.toArrow,
           strokeStyle: this.options.color,
+          lineWidth: this.data.lineWidth,
         });
         this.hoverLayer.line.from.autoAnchor = true;
         this.dispatch('nodeCenter', this.moveIn.hoverNode);
@@ -946,6 +1276,9 @@ export class Topology {
         }
 
         break;
+      case MoveInType.Graffiti:
+        this.moveIn.hoverNode.pushPoint(new Point(e.x, e.y));
+        break;
     }
 
     // Save node rects to move.
@@ -956,13 +1289,20 @@ export class Topology {
     this.render();
   };
 
-  private onmouseup = (e: MouseEvent) => {
+  onmouseup = (e: {
+    x: number;
+    y: number;
+    button?: number;
+    ctrlKey?: boolean;
+    shiftKey?: boolean;
+    altKey?: boolean;
+  }) => {
     if (!this.mouseDown) return;
 
-    this.mouseDown = null;
+    this.mouseDown = undefined;
     this.lastTranlated.x = 0;
     this.lastTranlated.y = 0;
-    this.hoverLayer.dockAnchor = null;
+    this.hoverLayer.dockAnchor = undefined;
     this.hoverLayer.dockLineX = 0;
     this.hoverLayer.dockLineY = 0;
     this.divLayer.canvas.style.cursor = 'default';
@@ -979,6 +1319,20 @@ export class Topology {
       }
     } else {
       switch (this.moveIn.type) {
+        case MoveInType.Nodes:
+          if (e.ctrlKey && e.shiftKey && e.altKey) {
+            if (!this.moveIn.hoverNode.manualAnchors) {
+              this.moveIn.hoverNode.manualAnchors = [];
+            }
+
+            const point = new Point(e.x, e.y);
+            point.id = this.moveIn.hoverNode.id;
+            this.moveIn.hoverNode.manualAnchors.push(point);
+            this.moveIn.hoverNode.calcAnchors();
+            this.needCache = true;
+          }
+          break;
+
         // Add the line.
         case MoveInType.HoverAnchors:
           // New active.
@@ -1011,7 +1365,7 @@ export class Topology {
 
           this.offscreen.render();
 
-          this.hoverLayer.line = null;
+          this.hoverLayer.line = undefined;
           break;
         case MoveInType.AutoAnchor:
           if (
@@ -1032,7 +1386,7 @@ export class Topology {
           break;
 
         case MoveInType.LineControlPoint:
-          Store.set(this.generateStoreKey('pts-') + this.moveIn.hoverLine.id, null);
+          Store.set(this.generateStoreKey('pts-') + this.moveIn.hoverLine.id, undefined);
           break;
 
         case MoveInType.LineFrom:
@@ -1046,10 +1400,52 @@ export class Topology {
             this.data.pens.splice(this.findIndex(this.hoverLayer.line), 1);
           }
           break;
+        case MoveInType.Graffiti:
+          if (!this.moveIn.hoverNode.points || this.moveIn.hoverNode.points.length < 2) {
+            this.moveIn.type = MoveInType.None;
+            this.data.pens.pop();
+          } else {
+            this.moveIn.type = MoveInType.Nodes;
+            this.moveIn.hoverNode['doing'] = undefined;
+            this.moveIn.hoverNode.calcAnchors();
+            this.activeLayer.setPens([this.moveIn.hoverNode]);
+            this.hoverLayer.node = this.moveIn.hoverNode;
+            this.needCache = true;
+          }
+          break;
+        case MoveInType.Lines:
+          let previous: any;
+          if (this.moveIn.hoverLine.children && this.moveIn.hoverLine.children.length) {
+            previous = this.moveIn.hoverLine.children[this.moveIn.hoverLine.children.length - 1];
+          }
+          if (!previous) {
+            this.moveIn.hoverLine.children = [];
+          }
+          const line = new Line({
+            parentId: this.moveIn.hoverLine.id,
+            name: 'line',
+            from: new Point(
+              e.x,
+              e.y,
+            ),
+            fromArrow: previous ? '' : this.data.fromArrow,
+            to: new Point(e.x, e.y),
+            toArrow: '',
+            strokeStyle: this.options.color,
+            lineWidth: this.data.lineWidth,
+          });
+          if (previous) {
+            line.from.id = previous.id;
+            line.from.x = previous.to.x;
+            line.from.y = previous.to.y;
+            previous.to.id = line.id;
+          }
+          this.moveIn.hoverLine.children.push(line);
+          this.hoverLayer.line = line;
       }
     }
 
-    this.hoverLayer.dragRect = null;
+    this.hoverLayer.dragRect = undefined;
     this.render();
 
     if (this.needCache) {
@@ -1058,32 +1454,18 @@ export class Topology {
     this.needCache = false;
   };
 
-  private ondblclick = (e: MouseEvent) => {
-    const canvasPos = this.divLayer.canvas.getBoundingClientRect() as DOMRect;
+  private ondblclick = () => {
     if (this.moveIn.hoverNode) {
       this.dispatch('dblclick', this.moveIn.hoverNode);
-
-      if (
-        this.moveIn.hoverNode
-          .getTextRect()
-          .hit(new Point(e.x - (canvasPos.x || canvasPos.left), e.y - (canvasPos.y || canvasPos.top)))
-      ) {
+      if (!(this.data.locked || this.moveIn.hoverNode.locked || this.moveIn.hoverNode.hideInput || this.options.hideInput)) {
         this.showInput(this.moveIn.hoverNode);
       }
-
       this.moveIn.hoverNode.dblclick();
     } else if (this.moveIn.hoverLine) {
       this.dispatch('dblclick', this.moveIn.hoverLine);
-
-      if (
-        !this.moveIn.hoverLine.text ||
-        this.moveIn.hoverLine
-          .getTextRect()
-          .hit(new Point(e.x - (canvasPos.x || canvasPos.left), e.y - (canvasPos.y || canvasPos.top)))
-      ) {
+      if (!(this.data.locked || this.moveIn.hoverLine.locked || this.moveIn.hoverLine.hideInput || this.options.hideInput)) {
         this.showInput(this.moveIn.hoverLine);
       }
-
       this.moveIn.hoverLine.dblclick();
     }
   };
@@ -1101,6 +1483,9 @@ export class Topology {
     let moveX = 0;
     let moveY = 0;
     switch (key.key) {
+      case ' ':
+        this.spaceDown = true;
+        break;
       case 'a':
       case 'A':
         this.activeLayer.setPens(this.data.pens);
@@ -1108,32 +1493,37 @@ export class Topology {
         break;
       case 'Delete':
       case 'Backspace':
-        this.delete();
+        if (key.ctrlKey || key.metaKey) {
+          this.deleteAnchors();
+        } else {
+          this.delete();
+        }
+        done = true;
         break;
       case 'ArrowLeft':
         moveX = -5;
-        if (key.ctrlKey) {
+        if (key.ctrlKey || key.metaKey) {
           moveX = -1;
         }
         done = true;
         break;
       case 'ArrowUp':
         moveY = -5;
-        if (key.ctrlKey) {
+        if (key.ctrlKey || key.metaKey) {
           moveY = -1;
         }
         done = true;
         break;
       case 'ArrowRight':
         moveX = 5;
-        if (key.ctrlKey) {
+        if (key.ctrlKey || key.metaKey) {
           moveX = 1;
         }
         done = true;
         break;
       case 'ArrowDown':
         moveY = 5;
-        if (key.ctrlKey) {
+        if (key.ctrlKey || key.metaKey) {
           moveY = 1;
         }
         done = true;
@@ -1152,7 +1542,7 @@ export class Topology {
         break;
       case 'y':
       case 'Y':
-        if (key.ctrlKey) {
+        if (key.ctrlKey || key.metaKey) {
           this.redo();
         }
         break;
@@ -1160,9 +1550,61 @@ export class Topology {
       case 'Z':
         if (key.shiftKey) {
           this.redo();
-        } else {
+        } else if (key.ctrlKey || key.metaKey) {
           this.undo();
         }
+        break;
+      case 'Enter':
+        if (this.moveIn.type === MoveInType.Lines) {
+          this.moveIn.type = MoveInType.None;
+          this.moveIn.hoverLine['doing'] = '';
+          if (this.hoverLayer.line.getLen() < 10) {
+            this.moveIn.hoverLine.children.pop();
+            this.hoverLayer.line = this.moveIn.hoverLine.children[this.moveIn.hoverLine.children.length - 1] as Line;
+          }
+          if (this.moveIn.hoverLine['isNode']) {
+            const pts: any[] = [];
+            this.moveIn.hoverLine.children.forEach((l: Line) => {
+              pts.push(l.from);
+              if (l.controlPoints) {
+                l.controlPoints.forEach((pt: Point) => {
+                  pt.data = true;
+                  pts.push(pt);
+                });
+              }
+              pts.push(l.to);
+            });
+
+            const { x1, y1, x2, y2 } = getBboxOfPoints(pts);
+            const n = new Node({
+              name: 'lines',
+              rect: new Rect(x1, y1, x2 - x1, y2 - y1),
+              points: pts,
+              closePath: this.moveIn.hoverLine['closePath']
+            });
+            this.activeLayer.add(n);
+            this.data.pens.pop();
+            this.data.pens.push(n);
+          } else {
+            this.hoverLayer.line.toArrow = this.data.toArrow;
+            this.activeLayer.add(this.moveIn.hoverLine);
+          }
+          this.moveIn.hoverLine = undefined;
+        }
+
+        done = true;
+        break;
+      case 'Escape':
+        if (this.moveIn.type === MoveInType.Lines) {
+          this.moveIn.type = MoveInType.None;
+          this.moveIn.hoverLine.children.pop();
+          this.hoverLayer.line = this.moveIn.hoverLine.children[this.moveIn.hoverLine.children.length - 1] as Line;
+          this.hoverLayer.line.toArrow = this.data.toArrow;
+          this.moveIn.hoverLine['doing'] = '';
+          this.moveIn.hoverLine = undefined;
+        }
+
+        done = true;
         break;
     }
 
@@ -1176,7 +1618,6 @@ export class Topology {
     if (moveX || moveY) {
       this.activeLayer.saveNodeRects();
       this.activeLayer.move(moveX, moveY);
-      this.overflow();
       this.animateLayer.animate();
     }
 
@@ -1184,13 +1625,16 @@ export class Topology {
     this.cache();
   };
 
-  private getMoveIn(pt: Point) {
+  private getMoveIn(pt: { x: number; y: number; }) {
+    if (this.moveIn.type >= MoveInType.Graffiti) {
+      return;
+    }
     this.lastHoverNode = this.moveIn.hoverNode;
     this.lastHoverLine = this.moveIn.hoverLine;
     this.moveIn.type = MoveInType.None;
-    this.moveIn.hoverNode = null;
-    this.moveIn.lineControlPoint = null;
-    this.moveIn.hoverLine = null;
+    this.moveIn.hoverNode = undefined;
+    this.moveIn.lineControlPoint = undefined;
+    this.moveIn.hoverLine = undefined;
     this.hoverLayer.hoverAnchorIndex = -1;
 
     if (
@@ -1264,7 +1708,7 @@ export class Topology {
     }
   }
 
-  inChildNode(pt: Point, children: Pen[]) {
+  inChildNode(pt: { x: number; y: number; }, children: Pen[]) {
     if (!children) {
       return null;
     }
@@ -1293,7 +1737,7 @@ export class Topology {
     return null;
   }
 
-  inNode(pt: Point, node: Node, inChild = false) {
+  inNode(pt: { x: number; y: number; }, node: Node, inChild = false) {
     if (this.data.locked === Lock.NoEvent || !node.visible || node.locked === Lock.NoEvent) {
       return null;
     }
@@ -1301,15 +1745,11 @@ export class Topology {
     const child = this.inChildNode(pt, node.children);
     if (child) {
       if (this.moveIn.type < MoveInType.HoverAnchors) {
-        if (child.type === PenType.Line) {
-          this.moveIn.activeNode = node;
-          this.moveIn.type = MoveInType.Nodes;
-        } else if (child.stand) {
+        this.moveIn.type = MoveInType.Nodes;
+        if (child.stand) {
           this.moveIn.activeNode = child;
-          this.moveIn.type = MoveInType.Nodes;
         } else {
           this.moveIn.activeNode = node;
-          this.moveIn.type = MoveInType.Nodes;
         }
       }
       return child;
@@ -1385,48 +1825,56 @@ export class Topology {
     return null;
   }
 
-  inLine(point: Point, line: Line) {
-    if (!line.visible) {
+  inLine(point: { x: number; y: number; }, line: Line) {
+    if (this.data.locked === Lock.NoEvent || !line.visible || line.locked === Lock.NoEvent) {
       return null;
     }
 
-    if (line.from.hit(point, this.options.anchorSize)) {
-      this.moveIn.type = MoveInType.LineFrom;
-      this.moveIn.hoverLine = line;
-      if (this.data.locked || line.locked) {
-        this.divLayer.canvas.style.cursor = this.options.hoverCursor;
-      } else {
-        this.divLayer.canvas.style.cursor = 'move';
+    if (line.children) {
+      for (let child of line.children) {
+        const l = this.inLine(point, child as Line);
+        if (l) {
+          return l;
+        }
       }
-      return line;
     }
 
-    if (line.to.hit(point, this.options.anchorSize)) {
-      this.moveIn.type = MoveInType.LineTo;
-      this.moveIn.hoverLine = line;
-      if (this.data.locked || line.locked) {
-        this.divLayer.canvas.style.cursor = this.options.hoverCursor;
-      } else {
-        this.divLayer.canvas.style.cursor = 'move';
+    if (line.from) {
+      if (line.from.hit(point, this.options.anchorSize)) {
+        this.moveIn.type = MoveInType.LineFrom;
+        this.moveIn.hoverLine = line;
+        if (this.data.locked || line.locked) {
+          this.divLayer.canvas.style.cursor = this.options.hoverCursor;
+        } else {
+          this.divLayer.canvas.style.cursor = 'move';
+        }
+        return line;
       }
-      return line;
-    }
 
-    if (line.pointIn(point)) {
-      this.moveIn.type = MoveInType.LineMove;
-      this.moveIn.hoverLine = line;
-      this.divLayer.canvas.style.cursor = this.options.hoverCursor;
-      if (line.from.id || line.to.id) {
+      if (line.to.hit(point, this.options.anchorSize)) {
+        this.moveIn.type = MoveInType.LineTo;
+        this.moveIn.hoverLine = line;
+        if (this.data.locked || line.locked) {
+          this.divLayer.canvas.style.cursor = this.options.hoverCursor;
+        } else {
+          this.divLayer.canvas.style.cursor = 'move';
+        }
+        return line;
+      }
+
+      if (line.pointIn(point)) {
         this.moveIn.type = MoveInType.Line;
+        this.moveIn.hoverLine = line;
+        this.divLayer.canvas.style.cursor = this.options.hoverCursor;
+        return line;
       }
-      return line;
     }
 
     return null;
   }
 
   private getLineDock(point: Point, mode: AnchorMode = AnchorMode.Default) {
-    this.hoverLayer.dockAnchor = null;
+    this.hoverLayer.dockAnchor = undefined;
     for (const item of this.data.pens) {
       if (item instanceof Node) {
         const pen = item.hit(point, 10);
@@ -1465,6 +1913,7 @@ export class Topology {
           if (pen.rotatedAnchors[i].mode && pen.rotatedAnchors[i].mode !== mode) {
             continue;
           }
+
           if (pen.rotatedAnchors[i].hit(point, 10)) {
             point.id = pen.id;
             point.anchorIndex = i;
@@ -1476,39 +1925,75 @@ export class Topology {
             break;
           }
         }
+
+        if (this.hoverLayer.dockAnchor) {
+          break;
+        }
       } else if (item instanceof Line) {
         if (item.id === this.hoverLayer.line.id) {
           continue;
         }
 
-        if (item.from.hit(point, 10)) {
-          point.x = item.from.x;
-          point.y = item.from.y;
-          this.hoverLayer.dockAnchor = item.from;
-          break;
-        }
-
-        if (item.to.hit(point, 10)) {
-          point.x = item.to.x;
-          point.y = item.to.y;
-          this.hoverLayer.dockAnchor = item.to;
-          break;
-        }
-
-        if (item.controlPoints) {
-          for (const cp of item.controlPoints) {
-            if (cp.hit(point, 10)) {
-              point.x = cp.x;
-              point.y = cp.y;
-              this.hoverLayer.dockAnchor = cp;
+        if (item.children) {
+          let found = false;
+          for (let child of (item.children as any)) {
+            if (child.from.hit(point, 10)) {
+              point.x = child.from.x;
+              point.y = child.from.y;
+              this.hoverLayer.dockAnchor = child.from;
+              found = true;
               break;
+            }
+
+            if (child.to.hit(point, 10)) {
+              point.x = child.to.x;
+              point.y = child.to.y;
+              this.hoverLayer.dockAnchor = child.to;
+              found = true;
+              break;
+            }
+
+            if (child.controlPoints) {
+              for (const cp of child.controlPoints) {
+                if (cp.hit(point, 10)) {
+                  point.x = cp.x;
+                  point.y = cp.y;
+                  this.hoverLayer.dockAnchor = cp;
+                  found = true;
+                  break;
+                }
+              }
+            }
+          }
+          if (found) {
+            continue;
+          }
+        } else {
+          if (item.from.hit(point, 10)) {
+            point.x = item.from.x;
+            point.y = item.from.y;
+            this.hoverLayer.dockAnchor = item.from;
+            continue;
+          }
+
+          if (item.to.hit(point, 10)) {
+            point.x = item.to.x;
+            point.y = item.to.y;
+            this.hoverLayer.dockAnchor = item.to;
+            continue;
+          }
+
+          if (item.controlPoints) {
+            for (const cp of item.controlPoints) {
+              if (cp.hit(point, 10)) {
+                point.x = cp.x;
+                point.y = cp.y;
+                this.hoverLayer.dockAnchor = cp;
+                break;
+              }
             }
           }
         }
-      }
-
-      if (this.hoverLayer.dockAnchor) {
-        break;
       }
     }
 
@@ -1537,14 +2022,20 @@ export class Topology {
         }
       }
       if (item instanceof Line) {
-        if (rect.hit(item.from) && rect.hit(item.to)) {
+        if (item.children) {
+          item.children.forEach((child: Line) => {
+            if (rect.hit(child.from) && rect.hit(child.to)) {
+              this.activeLayer.add(child);
+            }
+          });
+        } else if (rect.hit(item.from) && rect.hit(item.to)) {
           this.activeLayer.add(item);
         }
       }
     }
   }
 
-  private getAngle(pt: Point) {
+  private getAngle(pt: { x: number; y: number; }) {
     if (pt.x === this.activeLayer.rect.center.x) {
       return pt.y <= this.activeLayer.rect.center.y ? 0 : 180;
     }
@@ -1571,10 +2062,6 @@ export class Topology {
   }
 
   showInput(item: Pen) {
-    if (this.data.locked || item.locked || item.hideInput || this.options.hideInput) {
-      return;
-    }
-
     this.inputObj = item;
     const textRect = item.getTextRect();
     this.input.value = item.text || '';
@@ -1586,7 +2073,7 @@ export class Topology {
     if (item.rotate / 360) {
       this.input.style.transform = `rotate(${item.rotate}deg)`;
     } else {
-      this.input.style.transform = null;
+      this.input.style.transform = undefined;
     }
     this.input.focus();
   }
@@ -1649,11 +2136,11 @@ export class Topology {
   }
 
   cache() {
+    if (this.options.cacheLen==0) return
     if (this.caches.index < this.caches.list.length - 1) {
       this.caches.list.splice(this.caches.index + 1, this.caches.list.length - this.caches.index - 1);
     }
-    const data = new TopologyData(this.data);
-    this.caches.list.push(data);
+    this.caches.list.push(this.pureData());
     if (this.caches.list.length > this.options.cacheLen) {
       this.caches.list.shift();
     }
@@ -1662,6 +2149,7 @@ export class Topology {
   }
 
   cacheReplace(pens: Pen[]) {
+    if (this.options.cacheLen==0) return
     if (pens && pens.length) {
       const needPenMap = {};
       for (let i = 0, len = pens.length; i < len; i++) {
@@ -1686,15 +2174,15 @@ export class Topology {
     }
   }
 
-  undo(noRedo = false) {
-    if (this.data.locked || this.caches.index < 1) {
+  undo(noRedo = false, force?: boolean) {
+    if (this.options.cacheLen==0) return
+    if ((!force && this.data.locked) || this.caches.index < 1) {
       return;
     }
 
-    this.divLayer.clear();
-    const data = new TopologyData(this.caches.list[--this.caches.index]);
-    this.data.pens.splice(0, this.data.pens.length);
-    this.data.pens.push.apply(this.data.pens, data.pens);
+    this.divLayer.clear(true);
+    this.animateLayer.stop();
+    this.data = createData(this.caches.list[--this.caches.index], this.id);
     this.render(true);
     this.divLayer.render();
 
@@ -1705,21 +2193,20 @@ export class Topology {
     this.dispatch('undo', this.data);
   }
 
-  redo() {
-    if (this.data.locked || this.caches.index > this.caches.list.length - 2) {
+  redo(force?: boolean) {
+    if (this.options.cacheLen==0) return
+    if ((!force && this.data.locked) || this.caches.index > this.caches.list.length - 2) {
       return;
     }
-    this.divLayer.clear();
-    const data = new TopologyData(this.caches.list[++this.caches.index]);
-    this.data.pens.splice(0, this.data.pens.length);
-    this.data.pens.push.apply(this.data.pens, data.pens);
+    this.divLayer.clear(true);
+    this.data = createData(this.caches.list[++this.caches.index], this.id);
     this.render(true);
     this.divLayer.render();
 
     this.dispatch('redo', this.data);
   }
 
-  toImage(padding: Padding = 0, type = 'image/png', quality = 1, callback: any = null): string {
+  toImage(padding: Padding = 0, callback: any = undefined): string {
     const rect = this.getRect();
     const p = formatPadding(padding || 0);
     rect.x -= p[3];
@@ -1727,26 +2214,17 @@ export class Topology {
     rect.width += p[3] + p[1];
     rect.height += p[0] + p[2];
 
-    // const dpi = this.offscreen.getDpiRatio();
-    // const dpiRect = rect.clone();
-    // dpiRect.scale(dpi);
+    const dpi = this.offscreen.getDpiRatio();
+    rect.scale(dpi);
 
     const canvas = document.createElement('canvas');
     canvas.width = rect.width;
     canvas.height = rect.height;
     const ctx = canvas.getContext('2d');
-    // ctx.scale(dpi, dpi);
 
-    if (type && type !== 'image/png') {
-      ctx.fillStyle = 'white';
+    if (this.data.bkColor || this.options.bkColor) {
+      ctx.fillStyle = this.data.bkColor || this.options.bkColor;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
-    }
-    if (this.data.bkColor) {
-      ctx.fillStyle = this.data.bkColor;
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
-    }
-    if (this.data.bkImage) {
-      ctx.drawImage(this.canvas.bkImg, 0, 0, canvas.width, canvas.height);
     }
 
     for (const item of this.data.pens) {
@@ -1754,58 +2232,92 @@ export class Topology {
       if (item.type) {
         pen = new Line(item);
       } else {
-        pen = new Node(item);
+        pen = new Node(item, true);
+        (pen as Node).animateFrames = [];
+        (pen as Node).img = (item as Node).img;
+        (pen as Node).elementId = '';
+        (pen as Node).elementLoaded = true;
+        (pen as Node).elementRendered = true;
       }
-
-      pen.translate(-rect.x, -rect.y);
+      pen.scale(dpi, rect.center);
+      pen.translate(-rect.x, -rect.y, true);
       pen.render(ctx);
     }
-
+    ctx.scale(1 / dpi, 1 / dpi);
+    if (this.data.bkImage) {
+      ctx.drawImage(this.canvas.bkImg, 0, 0);
+    }
     if (callback) {
       canvas.toBlob(callback);
     }
-    return canvas.toDataURL(type, quality);
+    return canvas.toDataURL('image/png', 1);
   }
 
-  saveAsImage(name?: string, padding: Padding = 0, type: string = 'image/png', quality = 1) {
+  saveAsImage(name?: string, padding: Padding = 0) {
     const a = document.createElement('a');
     a.setAttribute('download', name || 'le5le.topology.png');
-    a.setAttribute('href', this.toImage(padding, type, quality));
+    a.setAttribute('href', this.toImage(padding));
     const evt = document.createEvent('MouseEvents');
     evt.initEvent('click', true, true);
     a.dispatchEvent(evt);
   }
 
-  delete(force?: boolean) {
-    const pens: Pen[] = [];
-    for (let i = 0; i < this.activeLayer.pens.length; i++) {
-      const pen = this.activeLayer.pens[i];
-      if (!force && pen.locked) {
-        continue;
-      }
-
-      const found = this.findIndex(pen);
-      if (found > -1) {
-        if (this.data.pens[found].type === PenType.Node) {
-          this.divLayer.removeDiv(this.data.pens[found] as Node);
-        }
-        if (this.options.disableEmptyLine) {
-          this.delEmptyLines(pen.id);
-        }
-        pens.push.apply(pens, this.data.pens.splice(found, 1));
-        --i;
-      }
-
-      this.animateLayer.pens.delete(pen.id);
-    }
-
-    if (!pens.length) {
+  // param:
+  //       - string ->idOrTag
+  //       - Pen[]  -> will deletes
+  delete(param?: string | Pen[], force?: boolean) {
+    if (this.data.locked && !force) {
       return;
     }
-    this.render(true);
-    this.cache();
 
-    this.dispatch('delete', pens);
+    let deleted: Pen[] = [];
+    if (typeof param === 'string') {
+      deleted = del(param, this.data.pens);
+    } else {
+      const pens: Pen[] = param || this.activeLayer.pens;
+
+      for (let i = 0; i < pens.length; i++) {
+        let item = pens[i];
+        if (item.type === PenType.Line && item.parentId) {
+          const parent = find(item.parentId, this.data.pens)[0];
+          if (parent && parent.name === 'lines') {
+            item = parent;
+          }
+        }
+        if (del(item.id, this.data.pens).length) {
+          deleted.push(item);
+          --i;
+          if (item.type === PenType.Node) {
+            this.divLayer.removeDiv(item as Node);
+          }
+          if (this.options.disableEmptyLine) {
+            this.delEmptyLines(item.id);
+          }
+          this.animateLayer.pens.delete(item.id);
+        }
+      }
+    }
+
+    if (deleted.length) {
+      this.render(true);
+      this.cache();
+
+      this.dispatch('delete', deleted);
+    }
+  }
+
+  deleteAnchors(param?: Pen[], force?: boolean) {
+    if (this.data.locked && !force) {
+      return;
+    }
+
+    const pens: Pen[] = param || this.activeLayer.pens;
+    pens.forEach((pen: Pen) => {
+      if (pen.type === PenType.Node) {
+        (pen as Node).manualAnchors = undefined;
+        (pen as Node).calcAnchors();
+      }
+    });
   }
 
   delEmptyLines(deleteedId?: string) {
@@ -1823,35 +2335,12 @@ export class Topology {
     }
   }
 
-  removeNode(node: Node) {
-    const i = this.findIndex(node);
-    if (i > -1) {
-      this.divLayer.removeDiv(this.data.pens[i] as Node);
-      const nodes = this.data.pens.splice(i, 1);
-      this.dispatch('delete', nodes);
-    }
-
-    this.render(true);
-    this.cache();
-  }
-
-  removeLine(line: Line) {
-    const i = this.findIndex(line);
-    if (i > -1) {
-      const lines = this.data.pens.splice(i, 1);
-      this.dispatch('delete', lines);
-    }
-
-    this.render(true);
-    this.cache();
-  }
-
   cut() {
     if (this.data.locked) {
       return;
     }
 
-    this.clipboard = new TopologyData({
+    this.clipboard = createData({
       pens: [],
     });
     for (let i = 0; i < this.activeLayer.pens.length; i++) {
@@ -1863,16 +2352,14 @@ export class Topology {
           this.divLayer.removeDiv(this.data.pens[found] as Node);
         }
         this.data.pens.splice(found, 1);
-        --i;
       }
     }
-
     this.cache();
 
     this.activeLayer.clear();
-    this.hoverLayer.node = null;
-    this.moveIn.hoverLine = null;
-    this.moveIn.hoverNode = null;
+    this.hoverLayer.node = undefined;
+    this.moveIn.hoverLine = undefined;
+    this.moveIn.hoverNode = undefined;
 
     this.render();
 
@@ -1880,7 +2367,7 @@ export class Topology {
   }
 
   copy() {
-    this.clipboard = new TopologyData({
+    this.clipboard = createData({
       pens: [],
     });
     for (const pen of this.activeLayer.pens) {
@@ -1894,8 +2381,8 @@ export class Topology {
       return;
     }
 
-    this.hoverLayer.node = null;
-    this.hoverLayer.line = null;
+    this.hoverLayer.node = undefined;
+    this.hoverLayer.line = undefined;
 
     this.activeLayer.pens = [];
 
@@ -1926,6 +2413,7 @@ export class Topology {
         pen.controlPoints = controlPoints;
       }
       this.data.pens.push(pen);
+
       this.activeLayer.add(pen);
     }
 
@@ -1955,7 +2443,7 @@ export class Topology {
   }
 
   animate(autoplay = false) {
-    this.animateLayer.readyPlay(null, autoplay);
+    this.animateLayer.readyPlay(undefined, autoplay);
     this.animateLayer.animate();
   }
 
@@ -1965,6 +2453,13 @@ export class Topology {
     }
     for (const pen of pens) {
       if (pen instanceof Node) {
+        if (pen.autoRect) {
+          const ctx = this.canvas.canvas.getContext('2d');
+          const rect = calcTextRect(ctx, pen);
+          pen.rect.width = rect.width + pen.lineWidth * 2;
+          pen.rect.height = rect.height;
+        }
+
         pen.init();
         pen.initRect();
       }
@@ -2128,7 +2623,7 @@ export class Topology {
 
     this.activeLayer.setPens([node]);
 
-    this.dispatch('node', node);
+    this.dispatch('combine', node);
 
     this.cache();
   }
@@ -2153,21 +2648,39 @@ export class Topology {
     if (i > -1 && node.name === 'combine') {
       this.data.pens.splice(i, 1);
     } else {
-      node.children = null;
+      node.children = undefined;
     }
 
     this.cache();
 
     this.activeLayer.clear();
     this.hoverLayer.clear();
+
+    this.dispatch('uncombine', node);
   }
 
-  find(idOrTag: string, pens?: Pen[]) {
-    if (!pens) {
-      pens = this.data.pens;
+  find(idOrTag: string, pens?: Pen[] | boolean, array?: boolean) {
+    let list: Pen[];
+    if (Array.isArray(pens)) {
+      list = pens;
+    } else {
+      list = this.data.pens;
+      array = pens;
     }
 
-    return find(idOrTag, pens);
+    const result = find(idOrTag, list);
+
+    if (array) {
+      return result;
+    }
+
+    if (result.length === 0) {
+      return null;
+    } else if (result.length === 1) {
+      return result[0];
+    }
+
+    return result;
   }
 
   findIndex(pen: Pen, pens?: Pen[]) {
@@ -2178,7 +2691,11 @@ export class Topology {
     return pens.findIndex((item: Pen) => item.id === pen.id);
   }
 
-  translate(x: number, y: number, process?: boolean) {
+  play(idOrTag: string, pause?: boolean) {
+    this.divLayer.play(idOrTag, pause);
+  }
+
+  translate(x: number, y: number, process?: boolean, noNotice?: boolean) {
     if (!process) {
       this.lastTranlated.x = 0;
       this.lastTranlated.y = 0;
@@ -2189,39 +2706,44 @@ export class Topology {
     for (const item of this.data.pens) {
       item.translate(offsetX, offsetY);
     }
-    this.animateLayer.pens.forEach((pen) => {
-      if (pen instanceof Line) {
-        pen.translate(offsetX, offsetY);
-      }
-    });
+    if (this.data.bkImageRect) {
+      this.data.bkImageRect.translate(offsetX, offsetY);
+    }
+
+    Store.set(this.generateStoreKey('LT:updateLines'), this.data.pens);
 
     this.lastTranlated.x = x;
     this.lastTranlated.y = y;
     this.render();
     this.cache();
 
-    this.dispatch('translate', { x, y });
+    !noNotice && this.dispatch('translate', { x, y });
   }
 
   // scale for scaled canvas:
   //   > 1, expand
   //   < 1, reduce
-  scale(scale: number, center?: Point) {
-    if (this.data.scale * scale < this.options.minScale || this.data.scale * scale > this.options.maxScale) {
-      return;
+  scale(scale: number, center?: { x: number; y: number; }) {
+    if (this.data.scale * scale < this.options.minScale) {
+      scale = this.options.minScale / this.data.scale;
+      this.data.scale = this.options.minScale;
+    } else if (this.data.scale * scale > this.options.maxScale) {
+      scale = this.options.maxScale / this.data.scale;
+      this.data.scale = this.options.maxScale;
+    } else {
+      this.data.scale = Math.round(this.data.scale * scale * 100) / 100;
     }
 
-    this.data.scale *= scale;
     !center && (center = this.getRect().center);
 
     for (const item of this.data.pens) {
       item.scale(scale, center);
     }
-    this.animateLayer.pens.forEach((pen) => {
-      if (pen instanceof Line) {
-        pen.scale(scale, center);
-      }
-    });
+    if (this.data.bkImageRect) {
+      this.data.bkImageRect.scale(scale, center);
+    }
+    Store.set(this.generateStoreKey('LT:updateLines'), this.data.pens);
+
     Store.set(this.generateStoreKey('LT:scale'), this.data.scale);
 
     this.render();
@@ -2231,9 +2753,8 @@ export class Topology {
   }
 
   // scale for origin canvas:
-  scaleTo(scale: number, center?: Point) {
+  scaleTo(scale: number, center?: { x: number; y: number; }) {
     this.scale(scale / this.data.scale, center);
-    this.data.scale = scale;
   }
 
   round() {
@@ -2279,6 +2800,7 @@ export class Topology {
     if (w > h) {
       ratio = h;
     }
+
     this.scale(ratio);
   }
 
@@ -2302,22 +2824,51 @@ export class Topology {
 
   private createMarkdownTip() {
     this.tipMarkdown = document.createElement('div');
+    this.tipMarkdown.className = 'topology-markdown';
     this.tipMarkdown.style.position = 'fixed';
     this.tipMarkdown.style.zIndex = '-1';
     this.tipMarkdown.style.left = '-9999px';
-    this.tipMarkdown.style.width = '260px';
-    this.tipMarkdown.style.outline = 'none';
-    this.tipMarkdown.style.border = '1px solid #333';
-    this.tipMarkdown.style.backgroundColor = 'rgba(0,0,0,.7)';
-    this.tipMarkdown.style.color = '#fff';
-    this.tipMarkdown.style.padding = '10px 15px';
-    this.tipMarkdown.style.overflowY = 'auto';
-    this.tipMarkdown.style.minHeight = '30px';
-    this.tipMarkdown.style.maxHeight = '260px';
+    this.tipMarkdown.style.padding = '8px 0';
+
+    this.tipMarkdownContent = document.createElement('div');
+    this.tipMarkdownContent.style.maxWidth = '320px';
+    this.tipMarkdownContent.style.outline = 'none';
+    this.tipMarkdownContent.style.borderRadius = '4px';
+    this.tipMarkdownContent.style.backgroundColor = 'rgba(0,0,0,.6)';
+    this.tipMarkdownContent.style.color = '#fff';
+    this.tipMarkdownContent.style.padding = '8px 16px';
+    this.tipMarkdownContent.style.lineHeight = '1.8';
+    this.tipMarkdownContent.style.overflowY = 'auto';
+    this.tipMarkdownContent.style.minHeight = '30px';
+    this.tipMarkdownContent.style.maxHeight = '400px';
+    this.tipMarkdown.appendChild(this.tipMarkdownContent);
+
+    this.tipMarkdownArrowUp = document.createElement('div');
+    this.tipMarkdownArrowUp.className = 'arrow';
+    this.tipMarkdownArrowUp.style.position = 'absolute';
+    this.tipMarkdownArrowUp.style.border = '6px solid transparent';
+    this.tipMarkdownArrowUp.style.backgroundColor = 'transparent';
+    this.tipMarkdownArrowUp.style.left = '50%';
+    this.tipMarkdownArrowUp.style.transform = 'translateX(-50%)';
+    this.tipMarkdownArrowUp.style.top = '-4px';
+    // this.tipMarkdownArrowUp.style.borderBottomColor = 'rgba(0,0,0,.6)';
+    this.tipMarkdown.appendChild(this.tipMarkdownArrowUp);
+
+    this.tipMarkdownArrowDown = document.createElement('div');
+    this.tipMarkdownArrowDown.className = 'arrow';
+    this.tipMarkdownArrowDown.style.position = 'absolute';
+    this.tipMarkdownArrowDown.style.border = '6px solid transparent';
+    this.tipMarkdownArrowDown.style.left = '50%';
+    this.tipMarkdownArrowDown.style.transform = 'translateX(-50%)';
+    this.tipMarkdownArrowDown.style.backgroundColor = 'transparent';
+    this.tipMarkdownArrowDown.style.bottom = '-4px';
+    // this.tipMarkdownArrowDown.style.borderTopColor = 'rgba(0,0,0,.6)';
+    this.tipMarkdown.appendChild(this.tipMarkdownArrowDown);
+
     document.body.appendChild(this.tipMarkdown);
   }
 
-  private showTip(data: Pen, pos: { x: number; y: number }) {
+  private showTip(data: Pen, pos: { x: number; y: number; }) {
     if (!data || data.id === this.tip || this.data.tooltip === false || this.data.tooltip === 0) {
       return;
     }
@@ -2335,13 +2886,13 @@ export class Topology {
     let elem = this.tipElem;
     if (data.markdown) {
       elem = this.tipMarkdown;
-      const marked = (window as any).marked;
+      const marked = window.marked;
       if (marked) {
-        this.tipMarkdown.innerHTML = marked(data.markdown);
+        this.tipMarkdownContent.innerHTML = marked(data.markdown);
       } else {
-        this.tipMarkdown.innerHTML = data.markdown;
+        this.tipMarkdownContent.innerHTML = data.markdown;
       }
-      const a = this.tipMarkdown.getElementsByTagName('A');
+      const a = this.tipMarkdownContent.getElementsByTagName('A');
       for (let i = 0; i < a.length; ++i) {
         a[i].setAttribute('target', '_blank');
       }
@@ -2353,25 +2904,28 @@ export class Topology {
 
     const parentRect = this.parentElem.getBoundingClientRect();
     const elemRect = elem.getBoundingClientRect();
-    let x = parentRect.left + data.rect.x;
-    let y = pos.y + parentRect.top;
-    if (data instanceof Node) {
-      // x = parentRect.left + (data as Node).rect.center.x - elemRect.width / 2;
-      y = parentRect.top + (data as Node).rect.ey;
+    let x = (parentRect.left || parentRect.x) + pos.x - (elemRect.width - data.rect.width) / 2;
+    let y = (parentRect.top || parentRect.y) + pos.y - elemRect.height - data.rect.height;
+    if (!data.type) {
+      x = (parentRect.left || parentRect.x) + data.rect.x - (elemRect.width - data.rect.width) / 2;
+      y = (parentRect.top || parentRect.y) + data.rect.ey - elemRect.height - data.rect.height;
     }
 
-    x -= this.parentElem.scrollLeft;
-    y -= this.parentElem.scrollTop;
+    if (y > 0) {
+      this.tipMarkdownArrowUp.style.borderBottomColor = 'transparent';
+      this.tipMarkdownArrowDown.style.borderTopColor = 'rgba(0,0,0,.6)';
+    } else {
+      if (data.type) {
+        y = (parentRect.top || parentRect.y) + pos.y;
+      } else {
+        y = (parentRect.top || parentRect.y) + data.rect.ey;
+      }
 
-    if (x < 0) {
-      x = 0;
+      this.tipMarkdownArrowUp.style.borderBottomColor = 'rgba(0,0,0,.6)';
+      this.tipMarkdownArrowDown.style.borderTopColor = 'transparent';
     }
-    if (x + elemRect.width > document.body.clientWidth) {
-      x = document.body.clientWidth - elemRect.width;
-    }
-    if (y + elemRect.height > document.body.clientHeight) {
-      y = document.body.clientHeight - elemRect.height;
-    }
+
+
 
     elem.style.display = 'block';
     elem.style.position = 'fixed';
@@ -2393,7 +2947,7 @@ export class Topology {
     if (this.tipElem) {
       this.tipElem.style.left = '-9999px';
       this.tipElem.style.zIndex = '-1';
-      this.tipElem = null;
+      this.tipElem = undefined;
     }
     this.divLayer.canvas.title = '';
 
@@ -2455,11 +3009,11 @@ export class Topology {
     this.canvas.clearBkImg();
   }
 
-  dispatch(event: string, data: any) {
+  dispatch(event: string, data?: any) {
     if (this.options.on) {
       this.options.on(event, data);
     }
-    this.fire(event, data);
+    this.emit(event, data);
     return this;
   }
 
@@ -2473,61 +3027,61 @@ export class Topology {
     return this;
   }
 
-  fire(eventType: EventType, params: any) {
+  emit(eventType: EventType, params: any) {
     this._emitter.emit(eventType, params);
     return this;
   }
 
   getValue(idOrTag: string, attr = 'text') {
-    let pen: Pen;
-    this.data.pens.forEach((item) => {
-      if (item.id === idOrTag || item.tags.indexOf(idOrTag) > -1) {
-        pen = item;
-        return;
-      }
-    });
+    let pen: Pen | Pen[] = this.find(idOrTag);
+    if (!pen) {
+      return;
+    }
+
+    if (Array.isArray(pen)) {
+      pen = pen[0];
+    }
+
+    if (!pen) {
+      return;
+    }
 
     return pen[attr];
   }
 
-  setValue(idOrTag: string, val: any, attr = 'text') {
-    let pen: Pen;
-    this.data.pens.forEach((item) => {
-      if (item.id === idOrTag || item.tags.indexOf(idOrTag) > -1) {
-        pen = item;
-        return;
+  setValue(idOrTag: any, val: any, attr = 'text') {
+    if (typeof idOrTag === 'object') {
+      val = idOrTag;
+      idOrTag = idOrTag.id || idOrTag.tag;
+    }
+
+    const pens = find(idOrTag, this.data.pens);
+    pens.forEach((item) => {
+      if (item.id === idOrTag || (item.tags && item.tags.indexOf(idOrTag) > -1)) {
+        if (typeof val === 'object') {
+          item.fromData(item, val);
+        } else {
+          item[attr] = val;
+        }
+        item.doWheres();
+
+        if (item.type === PenType.Node) {
+          (item as Node).animateReady = Node.cloneState(item);
+        }
       }
     });
 
-    pen[attr] = val;
+    this.willRender();
   }
 
-  createGrid() {
-    this.gridElem.style.position = 'absolute';
-    this.gridElem.style.display = 'none';
-    this.gridElem.style.left = '0';
-    this.gridElem.style.top = '0';
-    this.gridElem.innerHTML = `<svg class="svg-grid" width="100%" height="100%" style="position:absolute;left:0;right:0;top:0;bottom:0"
-      xmlns="http://www.w3.org/2000/svg">
-      <defs>
-        <pattern id="grid" width="10" height="10" patternUnits="userSpaceOnUse">
-          <path d="M 10 0 L 0 0 0 10" fill="none" stroke="#f3f3f3" stroke-width="1" />
-        </pattern>
-      </defs>
-      <rect width="100%" height="100%" fill="url(#grid)" />
-    </svg>`;
-    this.parentElem.appendChild(this.gridElem);
-  }
-
-  showGrid(show?: boolean) {
-    if (show === undefined) {
-      show = this.data.grid;
-    } else {
-      this.data.grid = show;
+  willRender() {
+    if (this.actionTimer) {
+      clearTimeout(this.actionTimer);
     }
-    this.gridElem.style.width = this.canvas.width + 'px';
-    this.gridElem.style.height = this.canvas.height + 'px';
-    this.gridElem.style.display = show ? 'block' : 'none';
+    this.actionTimer = setTimeout(() => {
+      this.render();
+      this.actionTimer = undefined;
+    }, 500);
   }
 
   setLineName(name: 'curve' | 'line' | 'polyline' | 'mind', render = true) {
@@ -2541,6 +3095,128 @@ export class Topology {
     render && this.render();
   }
 
+  setColor(color: string) {
+    this.options.color = color;
+    Store.set(this.generateStoreKey('LT:color'), color);
+
+    this.options.fontColor = color;
+    Store.set(this.generateStoreKey('LT:fontColor'), color);
+  }
+
+  setFontColor(color: string) {
+    this.options.fontColor = color;
+    Store.set(this.generateStoreKey('LT:fontColor'), color);
+  }
+
+  setIconColor(color: string) {
+    Store.set(this.generateStoreKey('LT:iconColor'), color);
+  }
+
+  setBkColor(color: string) {
+    this.data.bkColor = color;
+    Store.set('LT:bkColor', color);
+  }
+
+  pureData() {
+    const data = JSON.parse(JSON.stringify(this.data));
+    data.pens.forEach((pen: any) => {
+      for (const key in pen) {
+        if (pen[key] === undefined || pen[key] === undefined) {
+          delete pen[key];
+        }
+      }
+
+      delete pen.TID;
+      delete pen.animateCycleIndex;
+      delete pen.img;
+      delete pen.lastImage;
+      delete pen.fillImg;
+      delete pen.strokeImg;
+      delete pen.lastFillImage;
+      delete pen.lastStrokeImage;
+      delete pen.imgNaturalWidth;
+      delete pen.imgNaturalHeight;
+      delete pen.anchors;
+      delete pen.rotatedAnchors;
+      delete pen.dockWatchers;
+      delete pen.elementLoaded;
+      delete pen.elementRendered;
+      delete pen.animateReady;
+
+      if (pen.animateFrames && pen.animateFrames.length) {
+        for (const item of pen.animateFrames) {
+          if (item.initState) {
+            delete item.initState.TID;
+            delete item.initState.animateCycleIndex;
+            delete item.initState.img;
+            delete item.initState.lastImage;
+            delete item.initState.imgNaturalWidth;
+            delete item.initState.imgNaturalHeight;
+            delete item.initState.anchors;
+            delete item.initState.rotatedAnchors;
+            delete item.initState.dockWatchers;
+            delete item.initState.elementLoaded;
+            delete item.initState.elementRendered;
+            delete item.initState.fillImg;
+            delete item.initState.strokeImg;
+            delete item.initState.lastFillImage;
+            delete item.initState.lastStrokeImage;
+          }
+          if (item.state) {
+            delete item.state.TID;
+            delete item.state.animateCycleIndex;
+            delete item.state.img;
+            delete item.state.lastImage;
+            delete item.state.imgNaturalWidth;
+            delete item.state.imgNaturalHeight;
+            delete item.state.anchors;
+            delete item.state.rotatedAnchors;
+            delete item.state.dockWatchers;
+            delete item.state.elementLoaded;
+            delete item.state.elementRendered;
+            delete item.state.fillImg;
+            delete item.state.strokeImg;
+            delete item.state.lastFillImage;
+            delete item.state.lastStrokeImage;
+          }
+        }
+      }
+
+      this.pureDataChildren(pen);
+    });
+
+    return data;
+  }
+
+  pureDataChildren(data: any) {
+    if (!data.children) {
+      return;
+    }
+
+    data.children.forEach((pen: any) => {
+      for (const key in pen) {
+        if (pen[key] === undefined || pen[key] === undefined || pen[key] === '') {
+          delete pen[key];
+        }
+      }
+
+      delete pen.TID;
+      delete pen.animateCycleIndex;
+      delete pen.img;
+      delete pen.lastImage;
+      delete pen.imgNaturalWidth;
+      delete pen.imgNaturalHeight;
+      delete pen.anchors;
+      delete pen.rotatedAnchors;
+      delete pen.dockWatchers;
+      delete pen.elementLoaded;
+      delete pen.elementRendered;
+      delete pen.animateReady;
+
+      this.pureDataChildren(pen);
+    });
+  }
+
   destroy() {
     this.subcribe.unsubscribe();
     this.subcribeRender.unsubscribe();
@@ -2548,11 +3224,36 @@ export class Topology {
     this.subcribeAnimateEnd.unsubscribe();
     this.subcribeAnimateMoved.unsubscribe();
     this.subcribeMediaEnd.unsubscribe();
+    this.subcribeEmit.unsubscribe();
     this.animateLayer.destroy();
     this.divLayer.destroy();
+    this.canvas.destroy();
+    this.activeLayer.destroy();
+    this.hoverLayer.destroy();
+    this.offscreen.destroy();
     document.body.removeChild(this.tipMarkdown);
     window.removeEventListener('resize', this.winResize);
+    this.parentElem.removeEventListener('scroll', this.onScroll);
+    window.removeEventListener('scroll', this.onScroll);
+    document.removeEventListener('gesturestart', this.preventDefault);
+
+    switch (this.options.keydown) {
+      case KeydownType.Document:
+        document.removeEventListener('keydown', this.onkeydown);
+        break;
+      case KeydownType.Canvas:
+        this.divLayer.canvas.removeEventListener('keydown', this.onkeydown);
+        break;
+    }
     this.closeSocket();
-    (window as any).topology = null;
+    if (this.socketFn) {
+      this.off('websocket', this.socketFn as any);
+      this.off('mqtt', this.socketFn as any);
+    }
+
+    this.cache = undefined;
+    this.data = undefined;
+
+    window.topology = undefined;
   }
 }

@@ -36,22 +36,26 @@ export function find(idOrTag: string, pens: Pen[]) {
     }
 
     if ((item as any).children) {
-      const children: any = find(idOrTag, (item as any).children);
-      if (children && children.length > 1) {
-        result.push.apply(result, children);
-      } else if (children) {
-        result.push(children);
-      }
+      result.push(...find(idOrTag, (item as any).children));
     }
   });
 
-  if (result.length === 0) {
-    return;
-  } else if (result.length === 1) {
-    return result[0];
+  return result;
+}
+
+export function del(idOrTag: string, pens: Pen[]) {
+  const deleted: Pen[] = [];
+  for (let i = 0; i < pens.length; i++) {
+    if (pens[i].id === idOrTag || pens[i].tags.indexOf(idOrTag) > -1) {
+      deleted.push(pens[i]);
+      pens.splice(i, 1);
+      --i;
+    } else if ((pens[i] as any).children) {
+      deleted.push.apply(deleted, del(idOrTag, (pens[i] as any).children));
+    }
   }
 
-  return result;
+  return deleted;
 }
 
 export function getParent(pens: Pen[], child: Pen): Node {
@@ -84,7 +88,7 @@ export function getParent(pens: Pen[], child: Pen): Node {
   return parent;
 }
 
-export function pointInRect(point: Point, vertices: Point[]): boolean {
+export function pointInRect(point: { x: number; y: number; }, vertices: Point[]): boolean {
   if (vertices.length < 3) {
     return false;
   }
@@ -92,7 +96,7 @@ export function pointInRect(point: Point, vertices: Point[]): boolean {
 
   let last = vertices[vertices.length - 1];
   for (const item of vertices) {
-    if ((item.y < point.y && last.y >= point.y) || (item.y >= point.y && last.y < point.y)) {
+    if (((last.y > point.y) !== (item.y > point.y))) {
       if (item.x + ((point.y - item.y) * (last.x - item.x)) / (last.y - item.y) > point.x) {
         isIn = !isIn;
       }
@@ -104,12 +108,17 @@ export function pointInRect(point: Point, vertices: Point[]): boolean {
   return isIn;
 }
 
-export function pointInLine(point: Point, from: Point, to: Point): boolean {
-  const points: Point[] = [
-    new Point(from.x - 8, from.y - 8),
-    new Point(to.x - 8, to.y - 8),
-    new Point(to.x + 8, to.y + 8),
-    new Point(from.x + 8, from.y + 8),
+export function pointInLine(point: Point, from: Point, to: Point, padding = 1): boolean {
+  const angle = Math.atan2(from.y - to.y, to.x - from.x);
+  padding = padding > 5 ? padding : 5;
+  let x = Math.sin(angle) * padding;
+  const y = Math.cos(angle) * padding;
+
+  let points = [
+    new Point(from.x - x, from.y - y),
+    new Point(to.x - x, to.y - y),
+    new Point(to.x + x, to.y + y),
+    new Point(from.x + x, from.y + y)
   ];
 
   return pointInRect(point, points);

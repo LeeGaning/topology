@@ -1,8 +1,10 @@
-import { Store } from 'le5le-store';
+import { Observer, Store } from 'le5le-store';
 
 import { TopologyData } from './models/data';
 import { Options } from './options';
 import { Layer } from './layer';
+
+declare const window: any;
 
 export class Canvas extends Layer {
   static dpiRatio = 0;
@@ -11,9 +13,12 @@ export class Canvas extends Layer {
   canvas = document.createElement('canvas');
   width = 0;
   height = 0;
-  constructor(public parentElem: HTMLElement, public options: Options = {}, TID: String) {
+  subcribe: Observer;
+  constructor(public parentElem: HTMLElement, public options: Options = {}, TID: string) {
     super(TID);
-    this.data = Store.get(this.generateStoreKey('topology-data'));
+    this.subcribe = Store.subscribe(this.generateStoreKey('topology-data'), (val) => {
+      this.data = val;
+    });
     this.canvas.style.position = 'absolute';
     this.canvas.style.left = '0';
     this.canvas.style.top = '0';
@@ -21,13 +26,14 @@ export class Canvas extends Layer {
 
     if (!Canvas.dpiRatio) {
       if (!options.extDpiRatio && options.extDpiRatio !== 0) {
-        if (window.devicePixelRatio > 1) {
+        if (window && window.devicePixelRatio > 1) {
           options.extDpiRatio = 0.25;
         } else {
           options.extDpiRatio = 0;
         }
       }
-      Canvas.dpiRatio = window.devicePixelRatio + options.extDpiRatio;
+      Canvas.dpiRatio = (window ? window.devicePixelRatio : 0) + options.extDpiRatio;
+
 
       if (Canvas.dpiRatio < 1) {
         Canvas.dpiRatio = 1;
@@ -35,7 +41,7 @@ export class Canvas extends Layer {
     }
   }
 
-  resize(size?: { width: number; height: number }) {
+  resize(size?: { width: number; height: number; }) {
     if (size) {
       this.width = size.width | 0;
       this.height = size.height | 0;
@@ -68,5 +74,9 @@ export class Canvas extends Layer {
 
   getDpiRatio() {
     return Canvas.dpiRatio;
+  }
+
+  destroy() {
+    this.subcribe.unsubscribe();
   }
 }

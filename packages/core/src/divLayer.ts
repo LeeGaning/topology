@@ -1,13 +1,14 @@
 import { Store, Observer } from 'le5le-store';
 import { Options } from './options';
-import { Node, images } from './models/node';
-import { TopologyData } from './models/data';
+import { Node } from './models/node';
 import { Lock } from './models/status';
-import { PenType } from './models/pen';
+import { images, PenType } from './models/pen';
 import { Layer } from './layer';
+import { find } from './utils';
+
+let videos: { [key: string]: { player: HTMLElement; current: HTMLElement; media: HTMLMediaElement; }; } = {};
 
 export class DivLayer extends Layer {
-  protected data: TopologyData;
   canvas = document.createElement('div');
   player = document.createElement('div');
   curNode: Node;
@@ -17,28 +18,27 @@ export class DivLayer extends Layer {
   progress: HTMLElement;
   loop: HTMLElement;
   media: HTMLMediaElement;
-  videos: { [key: string]: { player: HTMLElement; current: HTMLElement; media: HTMLMediaElement } } = {};
-  audios: { [key: string]: { player: HTMLElement; current: HTMLElement; media: HTMLMediaElement } } = {};
-  iframes: { [key: string]: HTMLIFrameElement } = {};
-  elements: { [key: string]: HTMLElement } = {};
-  gifs: { [key: string]: HTMLImageElement } = {};
+  audios: { [key: string]: { player: HTMLElement; current: HTMLElement; media: HTMLMediaElement; }; } = {};
+  iframes: { [key: string]: HTMLIFrameElement; } = {};
+  elements: { [key: string]: HTMLElement; } = {};
+  gifs: { [key: string]: HTMLImageElement; } = {};
 
-  private subcribe: Observer;
+  private subcribeDiv: Observer;
+  private subcribePlay: Observer;
   private subcribeNode: Observer;
-  constructor(public parentElem: HTMLElement, public options: Options = {}, TID: String) {
+  constructor(public parentElem: HTMLElement, public options: Options = {}, TID: string) {
     super(TID);
-    this.data = Store.get(this.generateStoreKey('topology-data'));
     if (!this.options.playIcon) {
-      this.options.playIcon = 'iconfont icon-play';
+      this.options.playIcon = 't-icon t-play';
     }
     if (!this.options.pauseIcon) {
-      this.options.pauseIcon = 'iconfont icon-pause';
+      this.options.pauseIcon = 't-icon t-pause';
     }
     if (!this.options.fullScreenIcon) {
-      this.options.fullScreenIcon = 'iconfont icon-full-screen';
+      this.options.fullScreenIcon = 't-icon t-full-screen';
     }
     if (!this.options.loopIcon) {
-      this.options.loopIcon = 'iconfont icon-loop';
+      this.options.loopIcon = 't-icon t-loop';
     }
 
     this.canvas.style.position = 'absolute';
@@ -49,8 +49,11 @@ export class DivLayer extends Layer {
     parentElem.appendChild(this.canvas);
     parentElem.appendChild(this.player);
     this.createPlayer();
-
-    this.subcribe = Store.subscribe(this.generateStoreKey('LT:addDiv'), this.addDiv);
+    this.subcribeDiv = Store.subscribe(this.generateStoreKey('LT:addDiv'), this.addDiv);
+    this.subcribeDiv = Store.subscribe(this.generateStoreKey('LT:removeDiv'), this.removeDiv);
+    this.subcribePlay = Store.subscribe(this.generateStoreKey('LT:play'), (e: { pen: Node; pause?: boolean; }) => {
+      this.playOne(e.pen, e.pause);
+    });
 
     this.subcribeNode = Store.subscribe(this.generateStoreKey('LT:activeNode'), (node: Node) => {
       if (!node || (!node.video && !node.audio)) {
@@ -60,8 +63,8 @@ export class DivLayer extends Layer {
 
       if (node.audio && this.audios[node.id]) {
         this.media = this.audios[node.id].media;
-      } else if (node.video && this.videos[node.id]) {
-        this.media = this.videos[node.id].media;
+      } else if (node.video && videos[node.id]) {
+        this.media = videos[node.id].media;
       } else {
         return;
       }
@@ -100,19 +103,31 @@ export class DivLayer extends Layer {
       if (this.audios[node.id] && this.audios[node.id].media.src !== node.audio) {
         this.audios[node.id].media.src = node.audio;
       }
-      this.setElemPosition(node, (this.audios[node.id] && this.audios[node.id].player) || this.addMedia(node, 'audio'));
+      setTimeout(() => {
+        this.setElemPosition(node, (this.audios[node.id] && this.audios[node.id].player) || this.addMedia(node, 'audio'));
+      });
     }
     if (node.video) {
-      if (this.videos[node.id] && this.videos[node.id].media.src !== node.video) {
-        this.videos[node.id].media.src = node.video;
+      if (videos[node.id] && videos[node.id].media.src !== node.video) {
+        videos[node.id].media.src = node.video;
       }
-      this.setElemPosition(node, (this.videos[node.id] && this.videos[node.id].player) || this.addMedia(node, 'video'));
+      setTimeout(() => {
+        this.setElemPosition(node, (videos[node.id] && videos[node.id].player) || this.addMedia(node, 'video'));
+      });
     }
+
     if (node.iframe) {
-      if (this.iframes[node.id] && this.iframes[node.id].src !== node.iframe) {
-        this.iframes[node.id].src = node.iframe;
+      if (!this.iframes[node.id]) {
+        this.addIframe(node);
+        setTimeout(() => {
+          this.addDiv(node);
+        });
+      } else {
+        if (this.iframes[node.id].src !== node.iframe) {
+          this.iframes[node.id].src = node.iframe;
+        }
+        this.setElemPosition(node, this.iframes[node.id]);
       }
-      this.setElemPosition(node, this.iframes[node.id] || this.addIframe(node));
     }
 
     if (node.elementId) {
@@ -131,8 +146,8 @@ export class DivLayer extends Layer {
       if (node.image.indexOf('.gif') < 0) {
         node.gif = false;
         this.canvas.removeChild(this.gifs[node.id]);
-        this.gifs[node.id] = null;
-      } else {
+        this.gifs[node.id] = undefined;
+      } else if (node.img) {
         if (this.gifs[node.id] && this.gifs[node.id].src !== node.image) {
           this.gifs[node.id].src = node.image;
         }
@@ -150,7 +165,7 @@ export class DivLayer extends Layer {
     }
   };
 
-  createPlayer() {
+  createPlayer = () => {
     this.player.style.position = 'fixed';
     this.player.style.outline = 'none';
     this.player.style.top = '-99999px';
@@ -236,9 +251,9 @@ export class DivLayer extends Layer {
     fullScreen.onclick = () => {
       this.media.requestFullscreen();
     };
-  }
+  };
 
-  getMediaCurrent() {
+  getMediaCurrent = () => {
     if (!this.media) {
       return;
     }
@@ -246,13 +261,14 @@ export class DivLayer extends Layer {
       this.formatSeconds(this.media.currentTime) + ' / ' + this.formatSeconds(this.media.duration);
     this.progressCurrent.style.width =
       (this.media.currentTime / this.media.duration) * this.progress.clientWidth + 'px';
-  }
+  };
 
-  addMedia(node: Node, type: string) {
+  addMedia = (node: Node, type: string) => {
     const player = document.createElement('div');
     const current = document.createElement('div');
     const media = document.createElement(type) as HTMLMediaElement;
 
+    player.id = node.id;
     current.style.position = 'absolute';
     current.style.outline = 'none';
     current.style.left = '0';
@@ -273,7 +289,7 @@ export class DivLayer extends Layer {
 
     player.style.background = 'transparent';
 
-    if (node.play === 1) {
+    if (node.playType === 1) {
       media.autoplay = true;
     }
     media.loop = node.playLoop;
@@ -296,40 +312,57 @@ export class DivLayer extends Layer {
       if (this.media === media) {
         this.playBtn.className = this.options.playIcon;
       }
-      this.playNext(node.nextPlay);
+      this.play(node.nextPlay);
     };
     media.onloadedmetadata = () => {
       this.getMediaCurrent();
     };
+
     media.src = node[type];
 
     player.appendChild(media);
     player.appendChild(current);
-    this[type + 's'][node.id] = {
-      player,
-      current,
-      media,
-    };
+    if (type === 'video') {
+      videos[node.id] = {
+        player,
+        current,
+        media,
+      };
+    } else {
+      this.audios[node.id] = {
+        player,
+        current,
+        media,
+      };
+    }
     this.canvas.appendChild(player);
 
     return player;
-  }
+  };
 
-  playNext(next: string) {
-    if (!next) {
+  play(idOrTag: any, pause?: boolean) {
+    if (!idOrTag) {
       return;
     }
 
-    for (const item of this.data.pens) {
-      if (!(item instanceof Node)) {
-        continue;
+    const pens = find(idOrTag, this.data.pens);
+    pens.forEach((item: Node) => {
+      this.playOne(item, pause);
+    });
+  }
+
+  playOne(item: Node, pause?: boolean) {
+    if (item.audio && this.audios[item.id] && this.audios[item.id].media) {
+      if (pause) {
+        this.audios[item.id].media.pause();
+      } else if (this.audios[item.id].media.paused) {
+        this.audios[item.id].media.play();
       }
-      if (item.tags.indexOf(next) > -1) {
-        if (item.audio && this.audios[item.id] && this.audios[item.id].media && this.audios[item.id].media.paused) {
-          this.audios[item.id].media.play();
-        } else if (item.video && this.videos[item.id].media && this.videos[item.id].media.paused) {
-          this.videos[item.id].media.play();
-        }
+    } else if (item.video && videos[item.id].media) {
+      if (pause) {
+        videos[item.id].media.pause();
+      } else if (videos[item.id].media.paused) {
+        videos[item.id].media.play();
       }
     }
   }
@@ -350,7 +383,7 @@ export class DivLayer extends Layer {
     return node.img;
   }
 
-  setElemPosition(node: Node, elem: HTMLElement) {
+  setElemPosition = (node: Node, elem: HTMLElement) => {
     if (!elem) {
       return;
     }
@@ -363,9 +396,9 @@ export class DivLayer extends Layer {
     if (node.rotate || node.offsetRotate) {
       elem.style.transform = `rotate(${node.rotate + node.offsetRotate}deg)`;
     }
-    if (node.video && this.videos[node.id] && this.videos[node.id].media) {
-      this.videos[node.id].media.style.width = '100%';
-      this.videos[node.id].media.style.height = '100%';
+    if (node.video && videos[node.id] && videos[node.id].media) {
+      videos[node.id].media.style.width = '100%';
+      videos[node.id].media.style.height = '100%';
     }
     if (this.data.locked > Lock.None || node.locked > Lock.None) {
       elem.style.userSelect = 'initial';
@@ -374,33 +407,34 @@ export class DivLayer extends Layer {
       elem.style.userSelect = 'none';
       elem.style.pointerEvents = 'none';
     }
-  }
+  };
 
-  removeDiv(item: Node) {
+  removeDiv = (item: Node) => {
     if (this.curNode && item.id === this.curNode.id) {
-      this.curNode = null;
-      this.media = null;
+      this.curNode = undefined;
+      this.media = undefined;
       this.player.style.top = '-99999px';
     }
     if (item.audio) {
       this.canvas.removeChild(this.audios[item.id].player);
-      this.audios[item.id] = null;
+      this.audios[item.id] = undefined;
     }
     if (item.video) {
-      this.canvas.removeChild(this.videos[item.id].player);
-      this.videos[item.id] = null;
+      this.canvas.removeChild(videos[item.id].player);
+      videos[item.id] = undefined;
     }
     if (item.iframe) {
       this.canvas.removeChild(this.iframes[item.id]);
-      this.iframes[item.id] = null;
+      this.iframes[item.id] = undefined;
     }
     if (item.elementId) {
       this.canvas.removeChild(this.elements[item.id]);
-      this.elements[item.id] = null;
+      this.elements[item.id] = undefined;
+      item.elementId = '';
     }
     if (item.gif) {
       this.canvas.removeChild(this.gifs[item.id]);
-      this.gifs[item.id] = null;
+      this.gifs[item.id] = undefined;
     }
 
     if (item.children) {
@@ -411,19 +445,21 @@ export class DivLayer extends Layer {
         this.removeDiv(child as Node);
       }
     }
-  }
+  };
 
-  clear() {
+  clear(shallow?: boolean) {
     this.canvas.innerHTML = '';
     this.audios = {};
-    this.videos = {};
+    videos = {};
     this.iframes = {};
     this.elements = {};
     this.gifs = {};
 
-    // tslint:disable-next-line:forin
-    for (const key in images) {
-      delete images[key];
+    if (!shallow) {
+      // tslint:disable-next-line:forin
+      for (const key in images) {
+        delete images[key];
+      }
     }
 
     this.player.style.top = '-99999px';
@@ -447,7 +483,7 @@ export class DivLayer extends Layer {
     return txt;
   }
 
-  resize(size?: { width: number; height: number }) {
+  resize(size?: { width: number; height: number; }) {
     if (size) {
       this.canvas.style.width = size.width + 'px';
       this.canvas.style.height = size.height + 'px';
@@ -475,8 +511,10 @@ export class DivLayer extends Layer {
   }
 
   destroy() {
+    super.destroy();
     this.clear();
-    this.subcribe.unsubscribe();
+    this.subcribeDiv.unsubscribe();
     this.subcribeNode.unsubscribe();
+    this.subcribePlay.unsubscribe();
   }
 }

@@ -7,7 +7,10 @@ export function echarts(ctx: CanvasRenderingContext2D, node: Node) {
   rectangle(ctx, node);
 
   // tslint:disable-next-line:no-shadowed-variable
-  const echarts = echartsObjs.echarts || (window as any).echarts;
+  let echarts = echartsObjs.echarts;
+  if (!echarts && window) {
+    echarts = window['echarts'];
+  }
   if (!node.data || !echarts) {
     return;
   }
@@ -15,12 +18,11 @@ export function echarts(ctx: CanvasRenderingContext2D, node: Node) {
   if (typeof node.data === 'string') {
     node.data = JSON.parse(node.data);
   }
-
   if (!node.data.echarts) {
     return;
   }
 
-  if (!node.elementId) {
+  if (node.elementId === undefined || node.elementId === null) {
     node.elementId = s8();
   }
 
@@ -32,10 +34,7 @@ export function echarts(ctx: CanvasRenderingContext2D, node: Node) {
     document.body.appendChild(echartsObjs[node.id].div);
     // 添加当前节点到div层
     node.addToDiv();
-    echartsObjs[node.id].chart = echarts.init(
-      echartsObjs[node.id].div,
-      node.data.echarts.theme
-    );
+    echartsObjs[node.id].chart = echarts.init(echartsObjs[node.id].div, node.data.echarts.theme);
     node.elementRendered = false;
 
     // 等待父div先渲染完成，避免初始图表控件太大
@@ -50,6 +49,14 @@ export function echarts(ctx: CanvasRenderingContext2D, node: Node) {
       echartsObjs[node.id].chart.setOption(node.data.echarts.option);
       echartsObjs[node.id].chart.resize();
       node.elementRendered = true;
+
+      setTimeout(() => {
+        const img = new Image();
+        img.src = echartsObjs[node.id].chart.getDataURL({
+          pixelRatio: 2
+        });
+        node.img = img;
+      }, 100);
     });
   }
 }

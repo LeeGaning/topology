@@ -1,10 +1,10 @@
 export enum KeyType {
-  None = -1,
+  Any = -1,
   CtrlOrAlt,
   Ctrl,
   Shift,
   Alt,
-  Any,
+  Right,
 }
 
 export enum KeydownType {
@@ -29,28 +29,27 @@ export interface Options {
   dockFillStyle?: string;
   dragColor?: string;
   animateColor?: string;
-  font?: {
-    color?: string;
-    fontFamily?: string;
-    fontSize?: number;
-    lineHeight?: number;
-    textAlign?: string;
-    textBaseline?: string;
-  };
+  fontColor?: string;
+  fontFamily?: string;
+  fontSize?: number;
+  lineHeight?: number;
+  textAlign?: string;
+  textBaseline?: string;
   rotateCursor?: string;
   hoverCursor?: string;
   hideInput?: boolean;
   hideRotateCP?: boolean;
   hideSizeCP?: boolean;
   hideAnchor?: boolean;
-  onlySizeX?: boolean;
-  onlySizeY?: boolean;
+  disableSizeX?: boolean;
+  disableSizeY?: boolean;
   anchorSize?: number;
   alwaysAnchor?: boolean;
   autoAnchor?: boolean;
   disableEmptyLine?: boolean;
   disableRepeatLine?: boolean;
   disableScale?: boolean;
+  disableTranslate?: boolean;
   disableMoveOutParent?: boolean;
   disableDockLine?: boolean;
   playIcon?: string;
@@ -61,23 +60,30 @@ export interface Options {
   scaleKey?: KeyType;
   minScale?: number;
   maxScale?: number;
-  autoExpandDistance?: number;
   keydown?: KeydownType;
   viewPadding?: Padding;
+  bkColor?: string;
+  grid?: boolean;
+  gridColor?: string;
+  gridSize?: number;
+  rule?: boolean;
+  ruleColor?: string;
+  refresh?: number;
   on?: (event: string, data: any) => void;
 }
 
+export const fontKeys = ['fontColor', 'fontFamily', 'fontSize', 'lineHeight', 'textAlign', 'textBaseline'];
+
 export const DefalutOptions: Options = {
   cacheLen: 30,
-  font: {
-    color: '#222',
-    fontFamily: '"Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial',
-    fontSize: 12,
-    lineHeight: 1.5,
-    textAlign: 'center',
-    textBaseline: 'middle',
-  },
-  color: '#222',
+  refresh: 30,
+  fontColor: '#222222',
+  fontFamily: '"Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", Helvetica, Arial',
+  fontSize: 12,
+  lineHeight: 1.5,
+  textAlign: 'center',
+  textBaseline: 'middle',
+  color: '#222222',
   activeColor: '#1890ff',
   hoverColor: '#fa541c',
   anchorRadius: 4,
@@ -87,11 +93,12 @@ export const DefalutOptions: Options = {
   dragColor: '#1890ff',
   rotateCursor: '/assets/img/rotate.cur',
   hoverCursor: 'pointer',
-  minScale: 0.25,
+  minScale: 0.3,
   maxScale: 5,
   anchorSize: 5,
-  autoExpandDistance: 200,
   keydown: KeydownType.Document,
   viewPadding: 0,
-  autoAnchor: true,
+  gridSize: 10,
+  gridColor: '#f3f3f3',
+  ruleColor: '#888888',
 };

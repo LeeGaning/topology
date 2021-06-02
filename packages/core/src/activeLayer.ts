@@ -6,18 +6,15 @@ import { Node } from './models/node';
 import { Line } from './models/line';
 import { Rect } from './models/rect';
 import { Point } from './models/point';
-import { TopologyData } from './models/data';
 import { Lock } from './models/status';
 
 import { drawLineFns } from './middles';
 import { getBezierPoint } from './middles/lines/curve';
 import { Layer } from './layer';
-import { flatNodes, getBboxOfPoints } from './utils';
+import { find, flatNodes, getBboxOfPoints, rgba } from './utils';
 import { Topology } from './core';
 
 export class ActiveLayer extends Layer {
-  protected data: TopologyData;
-
   rotateCPs: Point[] = [];
   sizeCPs: Point[] = [];
   rect: Rect;
@@ -29,8 +26,8 @@ export class ActiveLayer extends Layer {
   // 备份初始位置，方便移动事件处理
   initialSizeCPs: Point[] = [];
   nodeRects: Rect[] = [];
-  childrenRects: { [key: string]: Rect } = {};
-  childrenRotate: { [key: string]: number } = {};
+  childrenRects: { [key: string]: Rect; } = {};
+  childrenRotate: { [key: string]: number; } = {};
 
   // nodes移动时，停靠点的参考位置
   dockWatchers: Point[] = [];
@@ -38,9 +35,8 @@ export class ActiveLayer extends Layer {
 
   rotating = false;
 
-  constructor(public options: Options = {}, TID: String) {
+  constructor(public options: Options = {}, TID: string) {
     super(TID);
-    this.data = Store.get(this.generateStoreKey('topology-data'));
     Store.set(this.generateStoreKey('LT:ActiveLayer'), this);
   }
 
@@ -49,8 +45,14 @@ export class ActiveLayer extends Layer {
       this.rect = this.pens[0].rect;
       this.sizeCPs = this.pens[0].rect.toPoints();
       this.rotateCPs = [
-        new Point(this.pens[0].rect.x + this.pens[0].rect.width / 2, this.pens[0].rect.y - 35),
-        new Point(this.pens[0].rect.x + this.pens[0].rect.width / 2, this.pens[0].rect.y),
+        new Point(
+          this.pens[0].rect.x + this.pens[0].rect.width / 2,
+          this.pens[0].rect.y - 35
+        ),
+        new Point(
+          this.pens[0].rect.x + this.pens[0].rect.width / 2,
+          this.pens[0].rect.y
+        ),
       ];
 
       if (this.rotate || this.pens[0].rotate) {
@@ -81,8 +83,16 @@ export class ActiveLayer extends Layer {
 
     const { x1, y1, x2, y2 } = getBboxOfPoints(this.getPoints());
     this.rect = new Rect(x1, y1, x2 - x1, y2 - y1);
-    this.sizeCPs = [new Point(x1, y1), new Point(x2, y1), new Point(x2, y2), new Point(x1, y2)];
-    this.rotateCPs = [new Point(x1 + (x2 - x1) / 2, y1 - 35), new Point(x1 + (x2 - x1) / 2, y1)];
+    this.sizeCPs = [
+      new Point(x1, y1),
+      new Point(x2, y1),
+      new Point(x2, y2),
+      new Point(x1, y2),
+    ];
+    this.rotateCPs = [
+      new Point(x1 + (x2 - x1) / 2, y1 - 35),
+      new Point(x1 + (x2 - x1) / 2, y1),
+    ];
 
     if (this.options.hideRotateCP) {
       this.rotateCPs = [new Point(-1000, -1000), new Point(-1000, -1000)];
@@ -111,11 +121,39 @@ export class ActiveLayer extends Layer {
         }
         points.push.apply(points, pts);
       } else if (item instanceof Line) {
-        points.push(item.from);
-        points.push(item.to);
-        if (item.name === 'curve') {
-          for (let i = 0.01; i < 1; i += 0.02) {
-            points.push(getBezierPoint(i, item.from, item.controlPoints[0], item.controlPoints[1], item.to));
+        if (item.children) {
+          item.children.forEach((child: Line) => {
+            points.push(child.from);
+            points.push(child.to);
+            if (child.name === 'curve') {
+              for (let i = 0.01; i < 1; i += 0.02) {
+                points.push(
+                  getBezierPoint(
+                    i,
+                    child.from,
+                    child.controlPoints[0],
+                    child.controlPoints[1],
+                    child.to
+                  )
+                );
+              }
+            }
+          });
+        } else if (item.from) {
+          points.push(item.from);
+          points.push(item.to);
+          if (item.name === 'curve') {
+            for (let i = 0.01; i < 1; i += 0.02) {
+              points.push(
+                getBezierPoint(
+                  i,
+                  item.from,
+                  item.controlPoints[0],
+                  item.controlPoints[1],
+                  item.to
+                )
+              );
+            }
           }
         }
       }
@@ -128,7 +166,7 @@ export class ActiveLayer extends Layer {
     this.pens = [];
     this.sizeCPs = [];
     this.rotateCPs = [];
-    Store.set(this.generateStoreKey('LT:activeNode'), null);
+    Store.set(this.generateStoreKey('LT:activeNode'), undefined);
   }
 
   // 即将缩放选中的nodes，备份nodes最初大小，方便缩放比例计算
@@ -136,7 +174,21 @@ export class ActiveLayer extends Layer {
     this.nodeRects = [];
     this.childrenRects = {};
     for (const item of this.pens) {
-      this.nodeRects.push(new Rect(item.rect.x, item.rect.y, item.rect.width, item.rect.height));
+      if (item.type && (item as Line).from) {
+        this.nodeRects.push(
+          new Rect(
+            (item as Line).from.x,
+            (item as Line).from.y,
+            item.rect.width,
+            item.rect.height
+          )
+        );
+      } else {
+        this.nodeRects.push(
+          new Rect(item.rect.x, item.rect.y, item.rect.width, item.rect.height)
+        );
+      }
+
       this.saveChildrenRects(item);
     }
 
@@ -149,12 +201,17 @@ export class ActiveLayer extends Layer {
   }
 
   private saveChildrenRects(node: Pen) {
-    if (!(node instanceof Node) || !node.children) {
+    if (node.type || !(node as Node).children) {
       return;
     }
 
-    for (const item of node.children) {
-      this.childrenRects[item.id] = new Rect(item.rect.x, item.rect.y, item.rect.width, item.rect.height);
+    for (const item of (node as Node).children) {
+      this.childrenRects[item.id] = new Rect(
+        item.rect.x,
+        item.rect.y,
+        item.rect.width,
+        item.rect.height
+      );
       this.childrenRotate[item.id] = item.rotate;
       this.saveChildrenRects(item);
     }
@@ -162,7 +219,16 @@ export class ActiveLayer extends Layer {
 
   // pt1 - the point of mouse down.
   // pt2 - the point of mouse move.
-  resize(type: number, pt1: { x: number; y: number }, pt2: { x: number; y: number }) {
+  resize(
+    type: number,
+    pt1: { x: number; y: number; },
+    pt2: {
+      x: number;
+      y: number;
+      ctrlKey?: boolean;
+      altKey?: boolean;
+    }
+  ) {
     const p1 = new Point(pt1.x, pt1.y);
     const p2 = new Point(pt2.x, pt2.y);
     if (this.pens.length === 1 && this.pens[0].rotate % 360) {
@@ -172,12 +238,7 @@ export class ActiveLayer extends Layer {
 
     let offsetX = p2.x - p1.x;
     let offsetY = p2.y - p1.y;
-    if (this.options.onlySizeX) {
-      offsetY = 0;
-    }
-    if (this.options.onlySizeY) {
-      offsetX = 0;
-    }
+
     const lines: Line[] = [];
 
     switch (type) {
@@ -203,18 +264,20 @@ export class ActiveLayer extends Layer {
         case PenType.Line:
           break;
         default:
-          if (!(item as Node).onlySizeX) {
+          item['oldRect'] = item.rect.clone();
+          if (
+            !this.options.disableSizeX &&
+            !pt2.altKey &&
+            !(item as Node).disableSizeX
+          ) {
             item.rect.width = this.nodeRects[i].width + offsetX;
           }
-          if (!(item as Node).onlySizeY) {
+          if (
+            !this.options.disableSizeY &&
+            !pt2.ctrlKey &&
+            !(item as Node).disableSizeY
+          ) {
             item.rect.height = this.nodeRects[i].height + offsetY;
-          }
-
-          if (item.rect.width < 10) {
-            item.rect.width = 10;
-          }
-          if (item.rect.height < 10) {
-            item.rect.height = 10;
           }
 
           switch (type) {
@@ -235,6 +298,7 @@ export class ActiveLayer extends Layer {
               item.rect.ey = item.rect.y + item.rect.height;
               break;
           }
+          (item as Node).scalePoints();
           item.rect.calcCenter();
           (item as Node).init();
           (item as Node).calcChildrenRect();
@@ -251,8 +315,9 @@ export class ActiveLayer extends Layer {
     if (this.nodeRects.length !== this.pens.length) {
       return;
     }
+
     let i = 0;
-    for (const item of this.pens) {
+    for (let item of this.pens) {
       if (item.locked) {
         continue;
       }
@@ -278,12 +343,21 @@ export class ActiveLayer extends Layer {
         }
       }
 
-      if (item instanceof Line) {
+      if (item instanceof Line && item.from) {
+        const offsetX = this.nodeRects[i].x + x - item.from.x;
+        const offsetY = this.nodeRects[i].y + y - item.from.y;
+        if (item.parentId) {
+          const items = find(item.parentId, this.data.pens);
+          items.forEach((l: Line) => {
+            l.translate(offsetX, offsetY);
+          });
+        } else {
+          item.translate(offsetX, offsetY);
+        }
       }
 
       ++i;
     }
-
     this.updateLines();
 
     this.topology.dispatch('move', this.pens);
@@ -302,10 +376,10 @@ export class ActiveLayer extends Layer {
       let fromIn = false;
       let toIn = false;
       for (const item of nodesLines.nodes) {
-        if (line.from.id === item.id) {
+        if (line.from && line.from.id === item.id) {
           fromIn = true;
         }
-        if (line.to.id === item.id) {
+        if (line.to && line.to.id === item.id) {
           toIn = true;
         }
       }
@@ -324,20 +398,17 @@ export class ActiveLayer extends Layer {
     }
 
     const nodesLines = flatNodes(pens);
+    const allLines = flatNodes(this.data.pens);
     const lines: Line[] = [];
-    nodesLines.lines.push.apply(
-      nodesLines.lines,
-      this.data.pens.filter((pen: Pen) => pen.type)
-    );
     const allNodes = flatNodes(this.data.pens).nodes;
-    for (const line of nodesLines.lines) {
+    for (const line of allLines.lines) {
       let nodes: Pen[] = nodesLines.nodes;
       if (this.options.autoAnchor) {
         nodes = allNodes;
       }
       for (const item of nodes) {
         let cnt = 0;
-        if (line.from.id === item.id) {
+        if (line.from && line.from.id === item.id) {
           if (line.from.autoAnchor) {
             const autoAnchor = (item as Node).nearestAnchor(line.to);
             if (autoAnchor.index > -1) {
@@ -346,12 +417,16 @@ export class ActiveLayer extends Layer {
             }
           }
           if (line.from.anchorIndex >= 0) {
-            line.from.x = (item as Node).rotatedAnchors[line.from.anchorIndex].x;
-            line.from.y = (item as Node).rotatedAnchors[line.from.anchorIndex].y;
+            line.from.x = (item as Node).rotatedAnchors[
+              line.from.anchorIndex
+            ].x;
+            line.from.y = (item as Node).rotatedAnchors[
+              line.from.anchorIndex
+            ].y;
             ++cnt;
           }
         }
-        if (line.to.id === item.id) {
+        if (line.to && line.to.id === item.id) {
           if (line.to.autoAnchor) {
             const autoAnchor = (item as Node).nearestAnchor(line.from);
             if (autoAnchor.index > -1) {
@@ -368,8 +443,8 @@ export class ActiveLayer extends Layer {
         if (cnt && !this.data.manualCps) {
           line.calcControlPoints();
         }
-        line.textRect = null;
-        Store.set(this.generateStoreKey('pts-') + line.id, null);
+        line.textRect = undefined;
+        Store.set(this.generateStoreKey('pts-') + line.id, undefined);
         lines.push(line);
       }
     }
@@ -414,7 +489,9 @@ export class ActiveLayer extends Layer {
         continue;
       }
       const oldCenter = this.childrenRects[item.id].center.clone();
-      const newCenter = this.childrenRects[item.id].center.clone().rotate(this.rotate, this.rect.center);
+      const newCenter = this.childrenRects[item.id].center
+        .clone()
+        .rotate(this.rotate, this.rect.center);
       const rect = this.childrenRects[item.id].clone();
       rect.translate(newCenter.x - oldCenter.x, newCenter.y - oldCenter.y);
       item.rect = rect;
@@ -482,7 +559,10 @@ export class ActiveLayer extends Layer {
   }
 
   render(ctx: CanvasRenderingContext2D) {
-    if (this.data.locked > Lock.Readonly || this.options.activeColor === 'transparent') {
+    if (
+      this.data.locked > Lock.Readonly ||
+      this.options.activeColor === 'transparent'
+    ) {
       return;
     }
 
@@ -506,12 +586,13 @@ export class ActiveLayer extends Layer {
     ctx.lineWidth = 1;
 
     const TID = this.TID;
+    const scale = Store.get(this.generateStoreKey('LT:scale')) || 1;
     for (const item of this.pens) {
-      if (item instanceof Node) {
-        const tmp = new Node(item, true);
+      if (this.data.locked && item instanceof Node) {
+        const tmp = new Node(item);
         tmp.setTID(TID);
-        tmp.data = null;
-        tmp.fillStyle = null;
+        tmp.data = undefined;
+        tmp.fillStyle = undefined;
         tmp.bkType = 0;
         tmp.icon = '';
         tmp.image = '';
@@ -529,20 +610,22 @@ export class ActiveLayer extends Layer {
 
       if (item instanceof Line) {
         const tmp = new Line(item);
+        tmp.lineWidth *= 2;
+        tmp.toArrowSize =
+          (tmp.toArrowSize * scale - 1.5 * tmp.lineWidth) / scale;
+        tmp.fromArrowSize =
+          (tmp.fromArrowSize * scale - 1.5 * tmp.lineWidth) / scale;
         tmp.setTID(TID);
-        if (tmp.lineWidth < 3) {
-          const bk = new Line(item);
-          bk.setTID(TID);
-          bk.strokeStyle = '#ffffff';
-          bk.render(ctx);
-        }
-        tmp.strokeStyle = this.options.activeColor;
+        tmp.strokeStyle = rgba(0.2, this.options.activeColor);
+        tmp.borderWidth = 4;
+        tmp.borderColor = rgba(0.1, this.options.activeColor);
         tmp.fromArrowColor = this.options.activeColor;
         tmp.toArrowColor = this.options.activeColor;
         tmp.render(ctx);
 
         if (!this.data.locked && !item.locked) {
-          drawLineFns[item.name].drawControlPointsFn(ctx, item);
+          drawLineFns[item.name] &&
+            drawLineFns[item.name].drawControlPointsFn(ctx, item);
         }
       }
     }
@@ -558,6 +641,11 @@ export class ActiveLayer extends Layer {
       ctx.translate(-this.rect.center.x, -this.rect.center.y);
     }
 
+    if (this.data.locked || this.locked()) {
+      ctx.restore();
+      return;
+    }
+
     // Occupied territory.
     ctx.save();
     ctx.globalAlpha = 0.3;
@@ -571,11 +659,6 @@ export class ActiveLayer extends Layer {
     ctx.stroke();
     ctx.restore();
 
-    if (this.data.locked || this.locked()) {
-      ctx.restore();
-      return;
-    }
-
     // Draw rotate control point.
     ctx.beginPath();
     ctx.moveTo(this.rotateCPs[0].x, this.rotateCPs[0].y);
@@ -588,7 +671,10 @@ export class ActiveLayer extends Layer {
     ctx.stroke();
 
     // Draw size control points.
-    if (!this.options.hideSizeCP && (this.pens.length > 1 || !this.pens[0].hideSizeCP)) {
+    if (
+      !this.options.hideSizeCP &&
+      (this.pens.length > 1 || !this.pens[0].hideSizeCP)
+    ) {
       ctx.lineWidth = 1;
       for (const item of this.sizeCPs) {
         ctx.save();
