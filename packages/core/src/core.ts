@@ -24,6 +24,7 @@ import { Socket } from './socket';
 // import { MQTT } from './mqtt';
 import { Direction, EventType as SocketEventType } from './models';
 import { isMobile } from './utils';
+import pkg from './../package.json';
 
 declare const window: any;
 
@@ -53,6 +54,7 @@ interface ICaches {
 const dockOffset = 10;
 
 export class Topology {
+  VERSION: string = pkg.version;
   id = s8();
   data: TopologyData = createData(undefined, this.id);
   clipboard: TopologyData;
@@ -655,9 +657,6 @@ export class Topology {
   }
 
   addLine(line: any, focus = false) {
-    if (this.data.locked) {
-      return null;
-    }
     if (line.type === PenType.Node) {
       line.isNode = true;
     }
@@ -1176,7 +1175,7 @@ export class Topology {
           this.dispatch('multi', this.activeLayer.pens);
         } else {
           this.activeLayer.pens = [this.moveIn.hoverLine];
-          this.dispatch('line', this.moveIn.hoverLine);
+          this.dispatch('line' + (e.button === 2 ? 'RightClick' : ''), this.moveIn.hoverLine);
         }
         this.hoverLayer.line = this.moveIn.hoverLine;
         this.hoverLayer.initLine = new Line(this.moveIn.hoverLine);
@@ -1249,26 +1248,26 @@ export class Topology {
         if (e.ctrlKey || e.shiftKey) {
           if (this.moveIn.hoverNode && this.activeLayer.hasInAll(this.moveIn.hoverNode)) {
             this.activeLayer.setPens([this.moveIn.hoverNode]);
-            this.dispatch('node', this.moveIn.hoverNode);
+            this.dispatch('node' + (e.button === 2 ? 'RightClick' : ''), this.moveIn.hoverNode);
           } else if (!this.activeLayer.has(this.moveIn.activeNode)) {
             this.activeLayer.add(this.moveIn.activeNode);
             if (this.activeLayer.pens.length > 1) {
               this.dispatch('multi', this.activeLayer.pens);
             } else {
-              this.dispatch('node', this.moveIn.activeNode);
+              this.dispatch('node' + (e.button === 2 ? 'RightClick' : ''), this.moveIn.activeNode);
             }
           }
         } else if (e.altKey) {
           if (this.moveIn.hoverNode) {
             this.activeLayer.setPens([this.moveIn.hoverNode]);
-            this.dispatch('node', this.moveIn.hoverNode);
+            this.dispatch('node' + (e.button === 2 ? 'RightClick' : ''), this.moveIn.hoverNode);
           } else if (this.moveIn.hoverLine) {
             this.activeLayer.setPens([this.moveIn.hoverLine]);
             this.dispatch('line', this.moveIn.hoverLine);
           }
         } else if (this.activeLayer.pens.length < 2) {
           this.activeLayer.setPens([this.moveIn.activeNode]);
-          this.dispatch('node', this.moveIn.activeNode);
+          this.dispatch('node' + (e.button === 2 ? 'RightClick' : ''), this.moveIn.activeNode);
         }
 
         if (this.data.locked || this.moveIn.activeNode.locked) {
@@ -1313,9 +1312,9 @@ export class Topology {
       if (this.activeLayer.pens && this.activeLayer.pens.length > 1) {
         this.dispatch('multi', this.activeLayer.pens);
       } else if (this.activeLayer.pens && this.activeLayer.pens[0] && this.activeLayer.pens[0].type === PenType.Line) {
-        this.dispatch('line', this.activeLayer.pens[0]);
+        this.dispatch('line' + (e.button === 2 ? 'RightClick' : ''), this.activeLayer.pens[0]);
       } else if (this.activeLayer.pens && this.activeLayer.pens[0] && this.activeLayer.pens[0].type === PenType.Node) {
-        this.dispatch('node', this.activeLayer.pens[0]);
+        this.dispatch('node' + (e.button === 2 ? 'RightClick' : ''), this.activeLayer.pens[0]);
       }
     } else {
       switch (this.moveIn.type) {
@@ -2136,7 +2135,7 @@ export class Topology {
   }
 
   cache() {
-    if (this.options.cacheLen==0) return
+    if (this.options.cacheLen == 0) return;
     if (this.caches.index < this.caches.list.length - 1) {
       this.caches.list.splice(this.caches.index + 1, this.caches.list.length - this.caches.index - 1);
     }
@@ -2149,7 +2148,7 @@ export class Topology {
   }
 
   cacheReplace(pens: Pen[]) {
-    if (this.options.cacheLen==0) return
+    if (this.options.cacheLen == 0) return;
     if (pens && pens.length) {
       const needPenMap = {};
       for (let i = 0, len = pens.length; i < len; i++) {
@@ -2175,7 +2174,7 @@ export class Topology {
   }
 
   undo(noRedo = false, force?: boolean) {
-    if (this.options.cacheLen==0) return
+    if (this.options.cacheLen == 0) return;
     if ((!force && this.data.locked) || this.caches.index < 1) {
       return;
     }
@@ -2194,7 +2193,9 @@ export class Topology {
   }
 
   redo(force?: boolean) {
-    if (this.options.cacheLen==0) return
+    if (this.options.cacheLen == 0) {
+      return;
+    }
     if ((!force && this.data.locked) || this.caches.index > this.caches.list.length - 2) {
       return;
     }
@@ -2372,6 +2373,7 @@ export class Topology {
     });
     for (const pen of this.activeLayer.pens) {
       this.clipboard.pens.push(pen.clone());
+      pen.parentId = null;
     }
     this.dispatch('copy', this.clipboard);
   }
@@ -2422,14 +2424,8 @@ export class Topology {
     this.cache();
     this.copy();
 
-    if (this.clipboard.pens.length > 1) {
-      this.dispatch('paste', {
-        pens: this.clipboard.pens,
-      });
-    } else if (this.activeLayer.pens.length > 0) {
-      this.dispatch('paste', this.activeLayer.pens[0]);
+    this.dispatch('paste', this.clipboard.pens);
     }
-  }
 
   newId(node: any, idMaps: any) {
     const old = node.id;
@@ -2706,7 +2702,7 @@ export class Topology {
     for (const item of this.data.pens) {
       item.translate(offsetX, offsetY);
     }
-    if (this.data.bkImageRect) {
+    if (this.data.bkImageRect && !this.data.bkImageStatic) {
       this.data.bkImageRect.translate(offsetX, offsetY);
     }
 
@@ -2739,7 +2735,7 @@ export class Topology {
     for (const item of this.data.pens) {
       item.scale(scale, center);
     }
-    if (this.data.bkImageRect) {
+    if (this.data.bkImageRect && !this.data.bkImageStatic) {
       this.data.bkImageRect.scale(scale, center);
     }
     Store.set(this.generateStoreKey('LT:updateLines'), this.data.pens);
@@ -2805,8 +2801,7 @@ export class Topology {
   }
 
   hasView() {
-    const rect = this.getRect();
-    return !(rect.width === 99999 || rect.height === 99999);
+    return !!this.data.pens.length;
   }
 
   getViewCenter(viewPadding?: Padding) {
